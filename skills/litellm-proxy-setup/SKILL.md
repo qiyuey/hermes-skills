@@ -1,6 +1,6 @@
 ---
 name: litellm-proxy-setup
-description: Configure Hermes Agent to use a self-hosted LiteLLM proxy as the model provider. Covers config.yaml setup, multi-model selection, and the custom_providers pattern.
+description: 配置 Hermes Agent 使用自托管的 LiteLLM proxy 作为模型提供商。涵盖 config.yaml 设置、多模型切换和 custom_providers 配置方式。
 version: 1.0.0
 author: qiyuey
 license: MIT
@@ -9,17 +9,17 @@ metadata:
     tags: [hermes, litellm, proxy, model, configuration]
 ---
 
-# Hermes + LiteLLM Proxy Setup
+# Hermes + LiteLLM Proxy 配置
 
-Use a self-hosted LiteLLM proxy as the Hermes model provider, exposing multiple models (opus/sonnet/haiku) through a single endpoint.
+将自托管的 LiteLLM proxy 作为 Hermes 的模型提供商，通过单一端点暴露多个模型（opus/sonnet/haiku）。
 
-## Prerequisites
+## 前置条件
 
-- LiteLLM proxy running and accessible (e.g. `http://192.168.1.1:4000`)
-- LiteLLM proxy configured with model aliases (claude-opus, claude-sonnet, claude-haiku)
-- Hermes installed
+- LiteLLM proxy 已运行并可访问（如 `http://192.168.1.1:4000`）
+- LiteLLM proxy 已配置模型别名（claude-opus、claude-sonnet、claude-haiku）
+- Hermes 已安装
 
-## config.yaml
+## config.yaml 配置
 
 ```yaml
 model:
@@ -39,16 +39,16 @@ custom_providers:
     claude-haiku: {}
 ```
 
-## Key Points
+## 关键说明
 
 1. `provider` 写 `custom:litellm`，名字与 `custom_providers[].name` 对应
 2. `model.base_url` 留空，实际地址在 `custom_providers[].base_url` 定义
 3. `models:` 字典决定 `/model` 切换时的可选列表，key 必须与 LiteLLM proxy 里配置的路由名一致
-4. 默认模型 (`model:`) 在列表中始终排第一
+4. 默认模型（`model:`）在列表中始终排第一
 
-## Compression / Auxiliary Model
+## 上下文压缩 / 辅助模型
 
-上下文压缩建议用轻量模型（haiku），单独配置：
+压缩建议用轻量模型（haiku），无需单独配置，`auto` 会自动复用主 provider：
 
 ```yaml
 auxiliary:
@@ -56,14 +56,14 @@ auxiliary:
     provider: auto   # 自动使用主 provider，无需重复配置
 ```
 
-## Switching Models
+## 切换模型
 
 ```
-/model            # 交互式选择，列出 custom_providers.models 下所有模型
+/model              # 交互式选择，列出 custom_providers.models 下所有模型
 /model claude-opus  # 直接切换
 ```
 
-## Pitfalls
+## 注意事项
 
 - LiteLLM proxy 里的模型别名必须和 `models:` 字典的 key 完全一致，否则请求会 404
 - 版本化名字（如 `anthropic/claude-sonnet-4.6`）要在 LiteLLM 那边配置路由，hermes 这边写什么名字取决于 proxy 暴露什么
