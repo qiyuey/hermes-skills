@@ -71,6 +71,30 @@ auxiliary:
 /model claude-opus  # 直接切换
 ```
 
+## 本地补丁：修复 /model 只显示一个模型
+
+Hermes 上游代码（`hermes_cli/model_switch.py`）的 `list_authenticated_providers()` 函数只读取 `custom_providers[].model` 单个字段，忽略了 `models:` 字典，导致 `/model` 切换列表只显示默认模型。
+
+相关上游 PR：#7783、#8770（截至 2026-04-15 尚未合并）。
+
+**修复方法**：在 `model_switch.py` Section 4（custom_providers 处理块）读取完 `default_model` 后，追加以下代码：
+
+```python
+# Also include models listed in the "models" dict/list field
+cfg_models = entry.get("models") or {}
+if isinstance(cfg_models, dict):
+    cfg_models = list(cfg_models.keys())
+if isinstance(cfg_models, list):
+    for m in cfg_models:
+        m = (m or "").strip()
+        if m and m not in groups[slug]["models"]:
+            groups[slug]["models"].append(m)
+```
+
+定位方式：搜索 `groups[slug]["models"].append(default_model)` 这行，在其后插入上述代码块。
+
+上游合并后可直接 `git pull` 覆盖本地补丁。
+
 ## 注意事项
 
 - LiteLLM proxy 里的模型别名必须和 `models:` 字典的 key 完全一致，否则请求会 404
