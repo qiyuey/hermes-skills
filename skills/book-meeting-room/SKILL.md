@@ -159,13 +159,15 @@ python3 ~/.hermes/scripts/book_meeting_room.py --refresh-login --dry-run
 1. F区4层（officeId=170，floor=4层）— 最优先
 2. E区4层（officeId=168，floor=4层）— 次优先
 3. E区/F区其他楼层 — 第三优先
-4. 全部职场（包括 ABD 区等）— 兜底
+4. 利星行中心其他区（ABD区 officeId=172、BD区 officeId=260）— 兜底
 
 建议 `PREFERRED_ROOM_IDS` 顺序：
 - F4: 2188(404), 2190(407), 2186(410), 2175(405), 2006(412)
 - E4: 2048(402), 2051(409), 2055(410), 2036(411), 2037(413)
 - EF其他层: F5/F6/E3/E5/E6 混排
-- 全部兜底: 加入 officeId=172（ABD区）等其他职场
+- 全部兜底: 加入 officeId=172（ABD区）
+
+只考虑利星行中心A座（officeId=168/170/172/260），不考虑望京SOHO、嘉润花园、宝能中心等其他职场。
 
 ## 会议室完整列表
 
