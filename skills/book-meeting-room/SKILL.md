@@ -19,6 +19,12 @@ triggers:
 
 `~/.hermes/scripts/book_meeting_room.py`
 
+脚本源文件在 skill 的 `scripts/book_meeting_room.py`，部署时需手动同步到 `~/.hermes/scripts/`：
+
+```bash
+cp ~/.hermes/skills/book-meeting-room/scripts/book_meeting_room.py ~/.hermes/scripts/
+```
+
 ## 系统预定规则（来自官方"预定说明"）
 
 | 类型 | 可预定范围 | 单次时长 | 每日上限 | 特殊说明 |
