@@ -48,12 +48,12 @@ custom_providers:
 
 ## 上下文压缩 / 辅助模型
 
-压缩建议用轻量模型（haiku），无需单独配置，`auto` 会自动复用主 provider：
+建议使用 `auto`，自动复用主 provider，无需额外配置：
 
 ```yaml
 auxiliary:
   compression:
-    provider: auto   # 自动使用主 provider，无需重复配置
+    provider: auto
 ```
 
 ## 切换模型
