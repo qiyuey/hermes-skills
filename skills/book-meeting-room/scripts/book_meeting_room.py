@@ -89,6 +89,14 @@ def parse_args():
                    help="snipe 模式下重试次数，默认5次")
     p.add_argument("--snipe-interval",type=float, default=10.0,
                    help="snipe 模式下每次间隔秒数，默认10秒")
+    # 弹性时长：允许缩短以提高成功率
+    p.add_argument("--flex",          type=int, default=0,
+                   help="允许缩短的15分钟粒度数（如 --flex 2 = 最多缩短30分钟）")
+    p.add_argument("--flex-direction",choices=["late-start", "early-end", "both"], default="both",
+                   help="缩短方向：late-start=晚开始, early-end=早结束, both=两端都可以")
+    # 降低容量要求
+    p.add_argument("--flex-capacity", type=int, default=0,
+                   help="允许降低的容量人数（如 --flex-capacity 2 = 最低可接受 min_capacity-2）")
     return p.parse_args()
 
 
@@ -325,9 +333,10 @@ def do_book(session, book_date, start_time, end_time, room_id, topic, attendees)
 
 # ───────────────────────── 核心逻辑 ─────────────────────────
 
-def scan_slots(window_start, window_end, duration_min):
-    """在窗口内生成所有候选时段，返回 [(start_str, end_str), ...]
+def scan_slots(window_start, window_end, duration_min, flex=0, flex_direction="both"):
+    """在窗口内生成所有候选时段，返回 [(start_str, end_str, actual_duration), ...]
 
+    先生成原始时长的所有时段，再追加弹性缩短的时段（优先原始时长）。
     系统要求开始/结束时间必须是15分钟的整数倍（:00/:15/:30/:45），
     最短15分钟，时长须为15分钟的倍数。步进按15分钟推进以覆盖更多空档。
     """
@@ -342,12 +351,37 @@ def scan_slots(window_start, window_end, duration_min):
     ws = t2m(window_start)
     we = t2m(window_end)
     work_end = WORK_END_HOUR * 60
+    cap = min(we, work_end)
 
+    # 生成所有候选时长：原始时长优先，然后按缩短粒度递增排列
+    durations = [duration_min]
+    for i in range(1, flex + 1):
+        shorter = duration_min - i * STEP
+        if shorter >= STEP:  # 最短15分钟
+            durations.append(shorter)
+
+    seen = set()
     slots = []
-    cur = ws
-    while cur + duration_min <= min(we, work_end):
-        slots.append((m2t(cur), m2t(cur + duration_min)))
-        cur += STEP
+    for dur in durations:
+        # 对每种时长，生成不同方向的偏移时段
+        cur = ws
+        while cur + dur <= cap:
+            # 原始时长总是生成（不管方向）
+            if dur == duration_min or flex_direction in ("both", "early-end"):
+                key = (cur, cur + dur)
+                if key not in seen:
+                    seen.add(key)
+                    slots.append((m2t(cur), m2t(cur + dur), dur))
+            if dur < duration_min and flex_direction in ("late-start", "both"):
+                # 晚开始变体：保持原始结束时间位置
+                orig_end = cur + duration_min
+                late_start = orig_end - dur
+                if late_start >= ws and orig_end <= cap:
+                    key = (late_start, orig_end)
+                    if key not in seen:
+                        seen.add(key)
+                        slots.append((m2t(late_start), m2t(orig_end), dur))
+            cur += STEP
     return slots
 
 
@@ -377,14 +411,36 @@ def try_once(session, book_date, start_time, end_time, args, current_ldap="", du
 
     # 窗口扫描模式：生成所有候选时段，逐段查找
     if duration:
-        slots = scan_slots(start_time, end_time, duration)
+        flex = getattr(args, 'flex', 0)
+        flex_dir = getattr(args, 'flex_direction', 'both')
+        flex_cap = getattr(args, 'flex_capacity', 0)
+        slots = scan_slots(start_time, end_time, duration, flex=flex, flex_direction=flex_dir)
         if not slots:
             return False, f"窗口 {start_time}-{end_time} 内无法容纳 {duration} 分钟时段"
-        for slot_start, slot_end in slots:
-            available = find_available(rooms, slot_start, slot_end, args.min_capacity, book_date)
-            if available:
-                return _do_book_from_available(
-                    available, session, book_date, slot_start, slot_end, args, current_ldap)
+
+        # 两轮搜索：第一轮用原始容量，第二轮降低容量（如果启用了 flex_capacity）
+        cap_levels = [args.min_capacity]
+        if flex_cap > 0:
+            lower = max(1, args.min_capacity - flex_cap)
+            if lower < args.min_capacity:
+                cap_levels.append(lower)
+
+        for min_cap in cap_levels:
+            for slot_start, slot_end, actual_dur in slots:
+                available = find_available(rooms, slot_start, slot_end, min_cap, book_date)
+                if available:
+                    flexed = actual_dur < duration or min_cap < args.min_capacity
+                    flex_note = ""
+                    if flexed:
+                        parts = []
+                        if actual_dur < duration:
+                            parts.append(f"时长{actual_dur}分钟(原{duration})")
+                        if min_cap < args.min_capacity:
+                            parts.append(f"容量≥{min_cap}人(原≥{args.min_capacity})")
+                        flex_note = f"  [弹性] {', '.join(parts)}\n"
+                    return _do_book_from_available(
+                        available, session, book_date, slot_start, slot_end, args, current_ldap,
+                        flex_note=flex_note)
         return False, f"窗口内所有时段均无空闲（查了 {len(rooms)} 间，{len(slots)} 个时段）"
 
     # 固定时段模式
@@ -395,11 +451,11 @@ def try_once(session, book_date, start_time, end_time, args, current_ldap="", du
         available, session, book_date, start_time, end_time, args, current_ldap)
 
 
-def _do_book_from_available(available, session, book_date, start_time, end_time, args, current_ldap):
+def _do_book_from_available(available, session, book_date, start_time, end_time, args, current_ldap, flex_note=""):
     """从可用列表中逐个尝试预约，返回 (success, message)"""
     if args.dry_run:
         names = [r["roomInfo"]["roomName"] for r in available[:5]]
-        return True, f"[DRY RUN] {start_time}-{end_time} 可用: {names}"
+        return True, f"[DRY RUN] {start_time}-{end_time} 可用: {names}" + (f"\n{flex_note.strip()}" if flex_note else "")
 
     attendees = ([current_ldap] if current_ldap else []) + [a for a in args.attendees if a != current_ldap]
     for room in available:
@@ -414,6 +470,7 @@ def _do_book_from_available(available, session, book_date, start_time, end_time,
                    f"({ri.get('officeName','')})\n"
                    f"  时间: {book_date} {start_time}-{end_time}\n"
                    f"  主题: {args.topic}\n"
+                   f"{flex_note}"
                    f"  预约ID: {booking_id}")
             return True, msg
         else:

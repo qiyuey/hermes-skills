@@ -35,6 +35,23 @@ triggers:
 
 ## Cron 自动化抢占（推荐方式）
 
+### Agent 创建 cron 前的询问清单
+
+用户说"帮我抢会议室"时，先确认基本信息（日期、时段、时长、人数），然后**主动询问弹性偏好**以提高成功率：
+
+1. **弹性时长**："会议室很抢手，如果抢不到完整的 X 分钟，接受缩短 15-30 分钟吗？"
+   - 用户同意 → 加 `--flex 1`（少15分钟）或 `--flex 2`（少30分钟）
+   - 默认推荐 `--flex 1`（对1小时会议允许45分钟，对2小时允许1小时45分钟）
+2. **缩短方向**："如果需要缩短，你倾向晚开始（保证结束时间），还是早结束（保证开始时间），还是都行？"
+   - 晚开始 → `--flex-direction late-start`（适合"会后有下一个安排"）
+   - 早结束 → `--flex-direction early-end`（适合"需要准时开始"）
+   - 都行 → `--flex-direction both`（默认，成功率最高）
+3. **弹性容量**："8人以上的大会议室更难抢，6人的也能接受吗？"
+   - 用户同意 → 加 `--flex-capacity 2`
+   - 仅在 min-capacity ≥ 6 时才值得问
+
+> 如果用户赶时间或说"随便"，使用默认推荐：`--flex 1 --flex-direction both`，不加 flex-capacity。
+
 ### 抢法：双层轮询
 
 - **外层**：cron 每1分钟触发一次
@@ -117,6 +134,9 @@ python3 ~/.hermes/skills/book-meeting-room/scripts/book_meeting_room.py --refres
 | `--snipe` | False | 高频抢占模式，适合 cron 调用 |
 | `--snipe-times` | 5 | snipe 模式重试次数 |
 | `--snipe-interval` | 10 | snipe 模式每次间隔秒数 |
+| `--flex` | 0 | 允许缩短的15分钟粒度数（如 2 = 最多缩短30分钟） |
+| `--flex-direction` | both | 缩短方向：late-start=晚开始, early-end=早结束, both=两端 |
+| `--flex-capacity` | 0 | 允许降低的容量人数（如 2 = 最低 min_capacity-2） |
 
 ## 用户偏好
 
