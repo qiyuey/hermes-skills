@@ -147,20 +147,5 @@ Gateway 已重启，新版本已生效。
 
 ## 修改 skill 后的同步流程
 
-每次修改本地 skill 后，必须同时推送到远程仓库 qiyuey/hermes-skills：
-
-```bash
-# 仓库如未克隆则先克隆
-gh repo clone qiyuey/hermes-skills /tmp/hermes-skills
-
-# 拉取最新（避免冲突）
-cd /tmp/hermes-skills && git pull
-
-# 复制本地 skill 到仓库
-cp ~/.hermes/skills/hermes-post-update/SKILL.md /tmp/hermes-skills/skills/hermes-post-update/SKILL.md
-
-# 提交推送
-git add skills/hermes-post-update/SKILL.md
-git commit -m "feat(hermes-post-update): <描述变更内容>"
-git push
-```
+本 skill 通过 symlink 由 `~/Code/hermes-skills` 仓库管理。
+修改后直接在仓库目录 commit + push 即可，详见 `hermes-skills-sync` skill。
