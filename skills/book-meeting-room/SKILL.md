@@ -17,13 +17,7 @@ triggers:
 
 ## 脚本路径
 
-`~/.hermes/scripts/book_meeting_room.py`
-
-脚本源文件在 skill 的 `scripts/book_meeting_room.py`，部署时需手动同步到 `~/.hermes/scripts/`：
-
-```bash
-cp ~/.hermes/skills/book-meeting-room/scripts/book_meeting_room.py ~/.hermes/scripts/
-```
+`~/.hermes/skills/book-meeting-room/scripts/book_meeting_room.py`
 
 ## 系统预定规则（来自官方"预定说明"）
 
@@ -54,7 +48,7 @@ hermes cron create \
   --name "会议室狙击-下周三下午" \
   --schedule "every 1m" \
   --prompt "执行以下命令：
-cd ~/.hermes/scripts && python3 book_meeting_room.py \
+python3 ~/.hermes/skills/book-meeting-room/scripts/book_meeting_room.py \
   --date 2026-04-22 --start 14:00 --end 19:00 \
   --duration 60 --min-capacity 8 \
   --office-id 170 168 172 260 \
@@ -84,24 +78,24 @@ exit code 说明：
 
 ```bash
 # 干跑：查询明天下午空闲（不预约）
-python3 ~/.hermes/scripts/book_meeting_room.py \
+python3 ~/.hermes/skills/book-meeting-room/scripts/book_meeting_room.py \
   --date tomorrow --start 14:00 --end 19:00 --duration 60 --dry-run
 
 # 直接预约：明天 14:00-15:00
-python3 ~/.hermes/scripts/book_meeting_room.py --start 14:00 --end 15:00
+python3 ~/.hermes/skills/book-meeting-room/scripts/book_meeting_room.py --start 14:00 --end 15:00
 
 # 窗口扫描：下午任意空闲1小时，8人以上
-python3 ~/.hermes/scripts/book_meeting_room.py \
+python3 ~/.hermes/skills/book-meeting-room/scripts/book_meeting_room.py \
   --start 14:00 --end 19:00 --duration 60 --min-capacity 8
 
 # 高频抢占（手动）
-python3 ~/.hermes/scripts/book_meeting_room.py \
+python3 ~/.hermes/skills/book-meeting-room/scripts/book_meeting_room.py \
   --date 2026-04-22 --start 14:00 --end 19:00 --duration 60 \
   --min-capacity 8 --office-id 170 168 172 260 \
   --snipe --snipe-times 5 --snipe-interval 10
 
 # Cookie 失效时强制重新登录
-python3 ~/.hermes/scripts/book_meeting_room.py --refresh-login --dry-run
+python3 ~/.hermes/skills/book-meeting-room/scripts/book_meeting_room.py --refresh-login --dry-run
 ```
 
 ## 完整参数
@@ -278,7 +272,7 @@ GET  /ep-inspire/user/queryUserInfo     # 用户信息
 ### 第一步：查找目标预约的 meetingId
 
 ```python
-sys.path.insert(0, str(Path.home() / ".hermes/scripts"))
+sys.path.insert(0, str(Path.home() / ".hermes/skills/book-meeting-room/scripts"))
 import book_meeting_room as b
 
 session, ldap = b.ensure_session()
