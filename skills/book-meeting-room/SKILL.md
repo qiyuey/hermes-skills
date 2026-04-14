@@ -22,7 +22,7 @@ triggers:
 - **认证方式**：飞连 SSO 一键登录（Playwright 自动化）
 - **用户**：登录后从 `GET /ep-inspire/user/queryUserInfo` 动态获取当前用户的 ldap 和姓名，不要硬编码
 - **城市**：北京（cityId: 178）
-- **默认职场**：利星行中心A座E区（officeId: 168）
+- **默认职场**：利星行中心A座F区（officeId: 170）
 - **Cookie 缓存**：`~/.hermes/cache/meeting_room_cookies.json`（约7天有效）
 - **偏好会议室**：314（id=1960）
 
