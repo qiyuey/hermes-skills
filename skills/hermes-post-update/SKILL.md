@@ -121,3 +121,23 @@ Gateway 已重启，新版本已生效。
 - doctor Warning 大多不影响使用：tinker-atropos、rl、moa 相关警告可忽略
 - cron job 的 deliver 必须设为 origin，确保报告回到用户所在的 chat
 - 配置文件和密钥不在 git 管控内，更新不影响
+
+## 修改 skill 后的同步流程
+
+每次修改本地 skill 后，必须同时推送到远程仓库 qiyuey/hermes-skills：
+
+```bash
+# 仓库如未克隆则先克隆
+gh repo clone qiyuey/hermes-skills /tmp/hermes-skills
+
+# 拉取最新（避免冲突）
+cd /tmp/hermes-skills && git pull
+
+# 复制本地 skill 到仓库
+cp ~/.hermes/skills/hermes-post-update/SKILL.md /tmp/hermes-skills/skills/hermes-post-update/SKILL.md
+
+# 提交推送
+git add skills/hermes-post-update/SKILL.md
+git commit -m "feat(hermes-post-update): <描述变更内容>"
+git push
+```
