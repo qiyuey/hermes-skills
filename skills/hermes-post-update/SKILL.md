@@ -1,7 +1,7 @@
 ---
 name: hermes-post-update
 description: Hermes 更新流程 — 通过 cron job 在后台执行，避免 gateway 重启中断当前会话。用户说"更新 hermes"或"帮我升级 hermes"时加载此 skill。
-version: 2.0.0
+version: 3.0.0
 author: Hermes Agent
 metadata:
   hermes:
@@ -17,36 +17,66 @@ metadata:
 
 ---
 
-## 执行方式
+## 首次运行：询问并创建定时任务
 
-直接用 cronjob 工具创建一次性任务，prompt 包含完整的更新逻辑（见下方模板），deliver 设为 origin（回到当前 chat）：
+检查是否已存在名为 `hermes-auto-update` 的 cron job（用 cronjob list 查看）。
+
+**如果不存在**，询问用户两个问题：
+
+1. 是否创建每日自动检查更新的定时任务？
+2. 更新报告发送到哪个渠道？列出当前会话上下文中已连接的平台供选择（如 Telegram、微信等），让用户选择或输入。
+
+拿到用户确认后，创建 cron job：
 
 ```
 cronjob(
   action="create",
-  schedule="1m",   # 立刻跑，1分钟后执行
-  repeat=1,        # 只跑一次
-  deliver="origin",
-  name="hermes-update",
-  prompt=<见下方 cron prompt 模板>
+  schedule="0 2 * * *",  # UTC 02:00 = 北京时间 10:00
+  repeat=forever,
+  deliver=<用户选择的渠道>,
+  name="hermes-auto-update",
+  prompt=<见下方 Cron Prompt 模板>
 )
 ```
 
-创建完 cron job 后，立刻回复用户：
-"已在后台启动更新，gateway 重启后会把结果发回这里，稍等片刻。"
+**如果已存在**，跳过询问，直接触发一次性更新（见下方"立即执行一次更新"）。
+
+---
+
+## 立即执行一次更新
+
+无论是否创建了定时任务，用户当下请求更新时，都需要立刻触发一次更新。用 cron job 一次性执行：
+
+```
+cronjob(
+  action="create",
+  schedule="1m",
+  repeat=1,
+  deliver=<用户选择的渠道，或已有定时任务的 deliver 渠道>,
+  name="hermes-update-now",
+  prompt=<见下方 Cron Prompt 模板>
+)
+```
+
+创建完后立刻回复用户：
+"已在后台启动更新，gateway 重启后会把结果发回来，稍等片刻。"
 
 ---
 
 ## Cron Prompt 模板
 
-以下是传给 cron job 的 prompt，必须自包含，不依赖当前会话上下文：
+以下 prompt 用于定时任务和一次性更新，必须自包含：
 
 ```
-执行 Hermes 更新流程，完成后把结果发回这个 chat。
+检查 Hermes 是否有新版本，有则执行更新，完成后汇报结果。
 
-## Step 1：记录当前版本
+## Step 1：记录当前 commit
 
-cd ~/.hermes/hermes-agent && git rev-parse HEAD
+cd ~/.hermes/hermes-agent && git fetch origin main 2>&1 && git rev-parse HEAD && git rev-parse origin/main
+
+对比本地和远程 commit hash：
+- 相同 → 已是最新，静默结束，不发送报告。
+- 不同 → 继续执行后续步骤。
 
 ## Step 2：执行更新
 
@@ -54,15 +84,7 @@ yes | hermes update 2>&1
 
 捕获完整输出。
 
-## Step 3：检查是否有新提交
-
-git rev-parse HEAD
-
-对比 Step 1 的 commit hash：
-- 相同 → 已是最新，记录"无新提交"
-- 不同 → 继续后续步骤
-
-## Step 4：获取更新日志（用 gh，不用 git log）
+## Step 3：获取更新日志
 
 gh release list --repo NousResearch/hermes-agent --limit 1
 
@@ -70,42 +92,43 @@ gh release list --repo NousResearch/hermes-agent --limit 1
 
 gh release view <tag> --repo NousResearch/hermes-agent
 
-从 release notes 中提取本次更新亮点（Highlights 部分，控制在 5 条以内最重要的），以及关键 Bug 修复。
+从 release notes 中提取：
+- Highlights 部分，最多 5 条最重要的新功能
+- 关键 Bug 修复（影响日常使用的优先）
 
-## Step 5：运行健康诊断
+## Step 4：运行健康诊断
 
 hermes doctor --fix 2>&1
 
-## Step 6：处理本地变更冲突
+## Step 5：处理本地变更冲突
 
 分析 Step 2 的输出：
-- "Already up to date" → 无需处理
-- "CONFLICT" → 分析冲突文件：
+- 无 CONFLICT → 记录"无冲突"
+- 有 CONFLICT → 分析冲突文件：
   git diff "stash@{0}^1"..stash@{0} -- <file>
   git diff HEAD~N..HEAD -- <file>
-  判断是否可以直接 drop stash，或需提示用户手动处理。
+  判断是否可以直接 drop stash，给出结论。
 
-## Step 7：发送报告
+## Step 6：发送报告
 
-整合成纯文本报告（不用 Markdown）：
+整合成纯文本（不用 Markdown）：
 
-【Hermes 更新完成】
+【Hermes 自动更新完成】
 
 更新时间：{当前时间}
-新增提交：{N 个 / 已是最新版本}
 
 ━━ 本地变更 ━━
 {无冲突 / stash 已自动恢复 / 具体冲突处理结果}
 
 ━━ 健康诊断 ━━
-{doctor 摘要：修复项 + 剩余警告}
+{doctor 摘要：修复项 + 剩余警告（忽略 tinker-atropos、rl、moa 相关警告）}
 
 ━━ 本次更新亮点 ━━
 新功能：
 • {来自 gh release notes，最多 5 条}
 
 Bug 修复：
-• {影响日常使用的优先}
+• {影响日常使用的优先，最多 3 条}
 
 ━━ 提示 ━━
 Gateway 已重启，新版本已生效。
@@ -116,11 +139,11 @@ Gateway 已重启，新版本已生效。
 ## 注意事项
 
 - hermes 安装目录：`~/.hermes/hermes-agent/`
-- 更新日志优先用 `gh release view` 读取，不用 git log（内容更结构化）
+- 更新日志用 `gh release view` 读取，不用 git log
 - `hermes doctor --fix` 比单独跑 `hermes config migrate` 更完整
 - doctor Warning 大多不影响使用：tinker-atropos、rl、moa 相关警告可忽略
-- cron job 的 deliver 必须设为 origin，确保报告回到用户所在的 chat
 - 配置文件和密钥不在 git 管控内，更新不影响
+- 定时任务 deliver 渠道由用户首次选择，不硬编码
 
 ## 修改 skill 后的同步流程
 
