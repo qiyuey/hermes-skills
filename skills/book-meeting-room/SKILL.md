@@ -154,7 +154,7 @@ python3 ~/.hermes/scripts/book_meeting_room.py --refresh-login --dry-run
 ```
 POST /ep-inspire/booking/queryList      # 查询会议室列表+预约情况
 POST /ep-inspire/booking/bookRoom       # 执行预约
-POST /ep-inspire/booking/cancelMeeting  # 取消预约
+POST /ep-inspire/booking/cancelMeeting?meetingId=xxx  # 取消预约（meetingId 必须在 query string，body 为 {}）
 GET  /ep-inspire/booking/queryMyBooking # 我的预约
 GET  /ep-inspire/user/queryUserInfo     # 用户信息
 ```
@@ -264,6 +264,45 @@ GET  /ep-inspire/user/queryUserInfo     # 用户信息
 | 203 | 2309 | 16人 |
 | 204 | 2310 | 16人 |
 | 205 | 2311 | 16人 |
+
+## 取消预约（手动触发流程）
+
+用户说"取消会议室"/"取消预约"时，按以下步骤操作：
+
+### 第一步：查找目标预约的 meetingId
+
+```python
+sys.path.insert(0, str(Path.home() / ".hermes/scripts"))
+import book_meeting_room as b
+
+session, ldap = b.ensure_session()
+
+payload = {
+    "pageNo": 1, "pageSize": 100,
+    "bookDate": "YYYY-MM-DD",
+    "capacity": [], "cityId": 178,
+    "equipments": [], "floors": [],
+    "officeId": [170, 168, 172, 260],
+    "onlyAvailable": False, "onlyEmpty": False, "type": []
+}
+r = session.post(f"{b.API_BASE}/ep-inspire/booking/queryList", json=payload)
+rooms = (r.json().get("data") or {}).get("list") or []
+# 遍历 room["bookingInfos"]，找 selfBooking=True 且匹配目标时段/会议名的条目，获取 meetingId
+```
+
+### 第二步：取消
+
+```python
+result = b.cancel_meeting(session, meeting_id)
+# code=0 → 成功
+# code=-1/"会议已被取消或不存在" → 已取消或 meetingId 错误
+# code=-1/"系统错误" → 已结束，无法取消
+```
+
+**⚠️ 关键：`cancelMeeting` 接口的 meetingId 必须放在 query string，body 为空 `{}`。**
+放在 JSON body 里会返回"系统错误"，这是已踩过的坑。
+
+`cancel_meeting()` 函数已封装在 `book_meeting_room.py` 中，直接调用即可。
 
 ## 注意事项
 
