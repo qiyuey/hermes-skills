@@ -85,8 +85,8 @@ def parse_args():
     # 高频抢占模式
     p.add_argument("--snipe",         action="store_true",
                    help="高频抢占模式：内部循环重试，适合 cron 调用")
-    p.add_argument("--snipe-times",   type=int, default=5,
-                   help="snipe 模式下重试次数，默认5次")
+    p.add_argument("--snipe-times",   type=int, default=6,
+                   help="snipe 模式下重试次数，默认6次")
     p.add_argument("--snipe-interval",type=float, default=10.0,
                    help="snipe 模式下每次间隔秒数，默认10秒")
     # 弹性时长：允许缩短以提高成功率
@@ -220,10 +220,10 @@ def ensure_session(refresh=False):
 # ───────────────────────── API 封装 ─────────────────────────
 
 def query_rooms(session, book_date, office_ids, page_size=100):
-    """查询多个职场的会议室列表，返回扁平列表"""
-    import requests as _req
-    all_rooms = []
-    for oid in office_ids:
+    """查询多个职场的会议室列表，并发请求，返回扁平列表"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def fetch_one(oid):
         try:
             resp = session.post(
                 f"{API_BASE}/ep-inspire/booking/queryList",
@@ -237,10 +237,33 @@ def query_rooms(session, book_date, office_ids, page_size=100):
                 },
                 timeout=10
             )
-            data = resp.json().get("data", {})
-            all_rooms.extend(data.get("list", []))
+            data = resp.json()
+            # 顺便检测日期未开放（code=-1 且"参数非法"）
+            if data.get("code") == -1 and "参数非法" in (data.get("message") or ""):
+                return oid, None, "date_not_open"
+            return oid, data.get("data", {}).get("list", []), None
         except Exception as e:
             print(f"[!] queryList officeId={oid} 失败: {e}")
+            return oid, [], None
+
+    results = {}
+    date_not_open = False
+    with ThreadPoolExecutor(max_workers=len(office_ids)) as pool:
+        futures = {pool.submit(fetch_one, oid): oid for oid in office_ids}
+        for fut in as_completed(futures):
+            oid, rooms, err = fut.result()
+            if err == "date_not_open":
+                date_not_open = True
+            elif rooms is not None:
+                results[oid] = rooms
+
+    if date_not_open and not results:
+        return None  # 信号：日期未开放
+
+    # 按 office_ids 原始顺序拼接，保证优先级稳定
+    all_rooms = []
+    for oid in office_ids:
+        all_rooms.extend(results.get(oid, []))
     return all_rooms
 
 
@@ -406,6 +429,14 @@ def try_once(session, book_date, start_time, end_time, args, current_ldap="", du
 
     office_ids = args.office_id if args.office_id else DEFAULT_OFFICE_IDS
     rooms = query_rooms(session, book_date, office_ids)
+    if rooms is None:
+        # 日期未开放（query_rooms 并发中检测到）
+        from datetime import date as _date
+        today = _date.today()
+        target = datetime.strptime(book_date, "%Y-%m-%d").date()
+        days_left = (target - today).days
+        print(f"[~] 目标日期 {book_date} 尚未开放（还需 {days_left - 7} 天），本轮跳过")
+        sys.exit(2)
     if not rooms:
         return False, "未获取到会议室数据（可能 cookie 失效）"
 
@@ -506,15 +537,6 @@ def main():
         print("[!] 警告：无法获取当前用户 ldap，attendees 将为空")
     else:
         print(f"[*] 当前用户: {current_ldap}")
-
-    # 日期开放检查（系统最多提前7天）
-    if not is_date_open(session, book_date):
-        from datetime import date as _date
-        today = _date.today()
-        target = datetime.strptime(book_date, "%Y-%m-%d").date()
-        days_left = (target - today).days
-        print(f"[~] 目标日期 {book_date} 尚未开放（还需 {days_left - 7} 天），本轮跳过")
-        sys.exit(2)  # exit 2 = 静默，cron 继续等待
 
     if args.snipe:
         # ── 高频抢占模式 ──
