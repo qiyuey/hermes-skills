@@ -1,7 +1,7 @@
 ---
 name: hermes-post-update
-description: Hermes 更新后处理流程 — 分析 hermes update 输出，处理本地变更冲突，运行 hermes doctor 诊断，并从官方获取更新日志推送给用户。在用户完成 hermes update 后加载此 skill。
-version: 1.0.0
+description: Hermes 更新流程 — 自动执行 hermes update、处理本地变更冲突、运行 hermes doctor 诊断、获取更新日志并汇报。用户说"更新 hermes"或"帮我升级 hermes"时加载此 skill。
+version: 1.1.0
 author: Hermes Agent
 metadata:
   hermes:
