@@ -19,6 +19,14 @@ metadata:
 - LiteLLM proxy 已配置模型别名（claude-opus、claude-sonnet、claude-haiku）
 - Hermes 已安装
 
+## 第一步：获取 LiteLLM 配置
+
+请用户提供 LiteLLM proxy 的 `config.yaml` 文件内容作为上下文（粘贴到对话中），以便准确获取：
+
+- proxy 地址和端口
+- 已配置的模型别名（`model_name`）
+- API key 设置方式
+
 ## config.yaml 配置
 
 ```yaml
