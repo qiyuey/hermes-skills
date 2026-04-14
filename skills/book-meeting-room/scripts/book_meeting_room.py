@@ -326,7 +326,13 @@ def do_book(session, book_date, start_time, end_time, room_id, topic, attendees)
 # ───────────────────────── 核心逻辑 ─────────────────────────
 
 def scan_slots(window_start, window_end, duration_min):
-    """在窗口内生成所有整点时段，返回 [(start_str, end_str), ...]"""
+    """在窗口内生成所有候选时段，返回 [(start_str, end_str), ...]
+
+    系统要求开始/结束时间必须是15分钟的整数倍（:00/:15/:30/:45），
+    最短15分钟，时长须为15分钟的倍数。步进按15分钟推进以覆盖更多空档。
+    """
+    STEP = 15  # 系统最小粒度
+
     def t2m(t):
         h, m = map(int, t.split(":"))
         return h * 60 + m
@@ -341,14 +347,29 @@ def scan_slots(window_start, window_end, duration_min):
     cur = ws
     while cur + duration_min <= min(we, work_end):
         slots.append((m2t(cur), m2t(cur + duration_min)))
-        cur += 60  # 按整点步进
+        cur += STEP
     return slots
 
 
 def try_once(session, book_date, start_time, end_time, args, current_ldap="", duration=None):
     """查询一次，找到可用房间则预约，返回 (success, message)
-    duration 不为 None 时，在 start_time-end_time 窗口内扫描所有整点时段。
+    duration 不为 None 时，在 start_time-end_time 窗口内扫描所有候选时段。
     """
+    # --room-id 指定了具体房间，跳过筛选直接预约
+    if args.room_id:
+        if args.dry_run:
+            return True, f"[DRY RUN] 指定 room_id={args.room_id}，时段 {start_time}-{end_time}"
+        attendees = ([current_ldap] if current_ldap else []) + [a for a in args.attendees if a != current_ldap]
+        result = do_book(session, book_date, start_time, end_time,
+                         args.room_id, args.topic, attendees)
+        if result.get("code") == 0:
+            data = result.get("data")
+            booking_id = data.get("id", data) if isinstance(data, dict) else data
+            return True, (f"预约成功！\n  会议室: roomId={args.room_id}\n"
+                          f"  时间: {book_date} {start_time}-{end_time}\n"
+                          f"  主题: {args.topic}\n  预约ID: {booking_id}")
+        return False, f"预约失败: {result.get('message', '未知错误')}"
+
     office_ids = args.office_id if args.office_id else DEFAULT_OFFICE_IDS
     rooms = query_rooms(session, book_date, office_ids)
     if not rooms:
@@ -450,7 +471,8 @@ def main():
                 success, msg = False, f"异常: {e}"
             print(msg.split('\n')[0])  # 只打第一行，保持日志简洁
             if success:
-                print(msg)
+                if '\n' in msg:
+                    print(msg)  # 多行时打完整信息
                 sys.exit(0)
             # cookie 失效时重新登录一次
             if "cookie" in msg.lower() or "未获取" in msg:
