@@ -1,219 +1,331 @@
 ---
 name: hermes-setup-bedrock
-description: 面向非技术用户（如产品经理）的 Hermes Agent 安装 + AWS Bedrock 配置向导。引导用户完成：安装 Hermes、安装 LiteLLM、写配置文件、启动代理服务、配置 Hermes 连接。需要用户提供 AWS Bedrock 凭证。
-version: 1.0.0
-author: Hermes Agent
-tags: [hermes, setup, bedrock, litellm, onboarding, beginner]
+description: 帮助用户在 macOS 上安装 Hermes Agent，并通过 LiteLLM 配置 AWS Bedrock Claude 模型。使用当用户需要安装 Hermes、配置 Claude、设置 Bedrock、提到收到了 ak/sk 邮件、或想完成 Hermes + Bedrock 的配置时。由 Agent 代为执行所有命令，用户只需提供邮件信息。
 ---
 
-# Hermes + AWS Bedrock 安装配置向导
+# 安装 Hermes + 配置 AWS Bedrock Claude 模型（macOS）
 
-面向没有深厚技术背景的用户（如产品经理）。请用友好、耐心的语气，一步一步引导。
-每完成一步都要让用户确认再继续，不要一次甩出所有命令。
+> **执行原则：由 Agent 代替用户执行所有命令。用户只需提供邮件信息，其余全部由 Agent 完成。**
 
 ---
 
-## 前提确认
+## 第一步：一次性收集所有所需信息
 
-在开始之前，先问用户以下几件事（一次问完）：
+**在做任何操作之前**，先用一条消息向用户索取以下全部信息：
 
-1. 操作系统是什么？（Mac / Windows / Linux）
-2. 是否已安装 Python？（不知道没关系，我们会检查）
-3. 手里有没有 AWS 的以下三样东西：
-   - AWS Access Key ID（形如 AKIA...）
-   - AWS Secret Access Key（一串较长的字符）
-   - AWS 区域（如 us-east-1，是你的 Bedrock 开通的区域）
+```
+您好！我来帮您完成安装配置，全程我来操作，您只需要提供几个信息就好。
 
-如果用户不确定去哪里找这些信息，引导他：
-AWS 控制台 → 右上角头像 → "安全凭证" → "访问密钥" 可以创建或查看 Access Key
+请把收到的邮件内容告诉我（或者直接把邮件截图/文字粘贴过来），我需要：
+1. ak（Access Key，例：AKIAQNAP4ZDZFQAIP2O4）
+2. sk（Secret Key，例：I3o3WFW...）
+3. 邮件里所有的模型名称和对应的模型key（arn:... 那一串）
 
----
+另外，如果安装过程中需要输入电脑开机密码（sudo 密码），请提前告诉我，或者安装时如果系统弹出密码提示，您在终端里输入就好（输入时屏幕不会显示字符，属于正常现象）。
+```
 
-## 第一步：检查 Python
-
-让用户打开终端（Mac 叫"终端 Terminal"，Windows 叫"命令提示符 CMD"或"PowerShell"），运行：
-
-    python3 --version
-
-- 显示 Python 3.x.x（3.9 以上）：可以继续
-- 报错"command not found"：需要先安装 Python
-  - Mac/Windows：访问 https://www.python.org/downloads/ 下载安装
-  - Windows 安装时记得勾选 "Add Python to PATH"
-  - 安装完成后重新打开终端再试一次
+等用户提供信息后再继续。
 
 ---
 
-## 第二步：安装 Hermes Agent
+## 第二步：解析邮件信息
 
-在终端里运行（一行，复制粘贴即可）：
+收到用户的邮件内容后，提取以下变量（后续步骤都用这些变量）：
 
-    curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+- `AWS_AK`：ak 的值
+- `AWS_SK`：sk 的值
+- 模型 ARN 映射（按名称分类）：
 
-等待安装完成。安装结束后，关闭终端，重新打开一个新终端，运行：
+| 邮件里的模型名称关键词 | 对应 Hermes 名称 |
+|---|---|
+| 包含 `SONNET` | `claude-sonnet`（主力模型，默认推荐） |
+| 包含 `HAIKU` | `claude-haiku`（快速轻量） |
+| 包含 `OPUS` 且版本最高 | `claude-opus`（最强旗舰） |
 
-    hermes --version
-
-显示版本号（比如 hermes 1.x.x），说明安装成功。
-
-常见问题：
-- 提示"hermes: command not found"：可能是环境变量没刷新
-  - Mac/Linux：运行 source ~/.bashrc 或 source ~/.zshrc
-  - Windows：重新打开 PowerShell
-
----
-
-## 第三步：安装 LiteLLM
-
-LiteLLM 是一个"翻译器"，把 AWS Bedrock 的接口转换成 Hermes 能理解的格式。
-
-在终端运行：
-
-    pip3 install "litellm[proxy]"
-
-安装完后验证：
-
-    litellm --version
-
-显示版本号即成功。
+如果邮件里有多个 OPUS（如 CLAUDE_45_OPUS 和 CLAUDE_46_OPUS），取版本号最高的那个作为 `claude-opus`。
 
 ---
 
-## 第四步：创建 LiteLLM 配置文件
+## 第三步：检查环境
 
-创建文件夹（Mac/Linux 在终端运行）：
+通过 Shell 工具执行以下检查，**不需要告诉用户命令内容**，直接执行：
 
-    mkdir -p ~/litellm
+```bash
+# 检查 Hermes 是否已安装
+hermes --version 2>/dev/null && echo "HERMES_OK" || echo "HERMES_MISSING"
+```
 
-然后用文本编辑器创建并编辑文件 ~/litellm/config.yaml，粘贴以下内容（把 YOUR_REGION 替换成你的 AWS 区域，比如 us-east-1）：
+```bash
+# 检查 LiteLLM 是否已安装
+litellm --version 2>/dev/null && echo "LITELLM_OK" || echo "LITELLM_MISSING"
+```
 
-    model_list:
-      - model_name: claude-sonnet
-        litellm_params:
-          model: bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0
-          aws_region_name: YOUR_REGION
+```bash
+# 检查 git（安装 Hermes 的前置依赖）
+git --version 2>/dev/null && echo "GIT_OK" || echo "GIT_MISSING"
+```
 
-      - model_name: claude-haiku
-        litellm_params:
-          model: bedrock/anthropic.claude-3-5-haiku-20241022-v1:0
-          aws_region_name: YOUR_REGION
+若 git 未安装，提示用户：「需要先安装 Xcode Command Line Tools，请在终端输入以下命令并按提示点击"安装"按钮（完成后告诉我）：」
+```bash
+xcode-select --install
+```
 
-    litellm_settings:
-      drop_params: true
-
-打开文件的方式：
-- Mac：open -e ~/litellm/config.yaml
-- Windows：文件路径是 %USERPROFILE%\litellm\config.yaml，用记事本打开
-- Linux：nano ~/litellm/config.yaml
-
----
-
-## 第五步：设置 AWS 凭证
-
-把 AWS 密钥告诉系统，推荐写入配置文件，重启后依然有效。
-
-Mac（zsh，macOS 默认 shell），在终端运行（引号里换成你自己的值）：
-
-    echo 'export AWS_ACCESS_KEY_ID="你的AccessKeyID"' >> ~/.zshrc
-    echo 'export AWS_SECRET_ACCESS_KEY="你的SecretAccessKey"' >> ~/.zshrc
-    echo 'export AWS_DEFAULT_REGION="你的区域"' >> ~/.zshrc
-    source ~/.zshrc
-
-Linux（bash），把 .zshrc 换成 .bashrc：
-
-    echo 'export AWS_ACCESS_KEY_ID="你的AccessKeyID"' >> ~/.bashrc
-    echo 'export AWS_SECRET_ACCESS_KEY="你的SecretAccessKey"' >> ~/.bashrc
-    echo 'export AWS_DEFAULT_REGION="你的区域"' >> ~/.bashrc
-    source ~/.bashrc
-
-Windows PowerShell，依次运行：
-
-    [System.Environment]::SetEnvironmentVariable("AWS_ACCESS_KEY_ID", "你的AccessKeyID", "User")
-    [System.Environment]::SetEnvironmentVariable("AWS_SECRET_ACCESS_KEY", "你的SecretAccessKey", "User")
-    [System.Environment]::SetEnvironmentVariable("AWS_DEFAULT_REGION", "你的区域", "User")
-
-设置完后重新打开终端。
+根据检查结果，跳过已安装的步骤。
 
 ---
 
-## 第六步：启动 LiteLLM 代理服务
+## 第四步：安装 Hermes（如未安装）
 
-在终端运行：
+若第三步检查结果为 `HERMES_MISSING`，通过 Shell 工具执行：
 
-    litellm --config ~/litellm/config.yaml --port 4000
+```bash
+curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+```
 
-启动成功后终端会显示类似：
+> 安装耗时约 1-3 分钟，等待完成。如果中途需要密码，告知用户：「安装程序需要您输入电脑开机密码，请在终端窗口输入（输入时不会显示字符，这是正常的）」
 
-    LiteLLM: Proxy initialized
-    Running on http://localhost:4000
-
-这个终端窗口要保持开着，不要关闭！
-
-验证服务是否正常（新开一个终端）：
-
-    curl http://localhost:4000/health
-
-返回 JSON 内容即正常。
+安装完成后执行：
+```bash
+source ~/.zshrc
+hermes --version
+```
 
 ---
 
-## 第七步：配置 Hermes 连接到 LiteLLM
+## 第五步：安装 LiteLLM（如未安装）
 
-在新开的终端运行这两行：
+若第三步检查结果为 `LITELLM_MISSING`，通过 Shell 工具执行：
 
-    hermes config set model.base_url http://localhost:4000/v1
-    hermes config set model.default claude-sonnet
+```bash
+pip install "litellm[proxy]"
+```
 
-然后把占位 API Key 写入 Hermes 密钥文件（LiteLLM 本地不需要真实 key）：
-
-    echo 'OPENAI_API_KEY=sk-dummy' >> ~/.hermes/.env
-
----
-
-## 第八步：验证整体运行
-
-运行：
-
-    hermes chat -q "你好，简单介绍一下你自己"
-
-如果 Hermes 正常回复，整个配置成功！
+安装后验证：
+```bash
+litellm --version
+```
 
 ---
 
-## 让 LiteLLM 后台持续运行（可选）
+## 第六步：写入 LiteLLM 配置文件
 
-每次电脑重启后需要重新启动 LiteLLM。如果不想手动，可以让它在后台运行：
+根据用户提供的信息，用 Write 工具直接写入 `~/.hermes/litellm_config.yaml`。
 
-Mac/Linux：
+**注意**：
+- 用实际的 ak/sk 替换占位符
+- 根据邮件里有哪些模型决定写哪几个 model_list 条目（最少要有 sonnet 和 haiku；如果邮件里没有某个模型，跳过该条目）
+- 如果邮件里有多个 HAIKU 版本，取版本号最高的
 
-    nohup litellm --config ~/litellm/config.yaml --port 4000 > ~/litellm/litellm.log 2>&1 &
+模板如下（按实际替换）：
 
-停止后台 LiteLLM：
+```yaml
+# LiteLLM Proxy Config — Bedrock bridge for Hermes Agent
+model_list:
+  # ── 主力模型：Sonnet ──────────────────────────────────────────────────────
+  - model_name: "claude-sonnet"
+    litellm_params:
+      model: "bedrock/converse/<SONNET_ARN>"
+      aws_access_key_id: "<AWS_AK>"
+      aws_secret_access_key: "<AWS_SK>"
+      aws_region_name: "us-west-2"
+      timeout: 600
+      stream_timeout: 30
+    model_info:
+      max_input_tokens: 1000000
+      max_output_tokens: 64000
+      context_window: 1000000
 
-    pkill -f "litellm"
+  # ── 快速模型：Haiku ───────────────────────────────────────────────────────
+  - model_name: "claude-haiku"
+    litellm_params:
+      model: "bedrock/converse/<HAIKU_ARN>"
+      aws_access_key_id: "<AWS_AK>"
+      aws_secret_access_key: "<AWS_SK>"
+      aws_region_name: "us-west-2"
+      timeout: 600
+      stream_timeout: 30
+    model_info:
+      max_input_tokens: 200000
+      max_output_tokens: 64000
+      context_window: 200000
+
+  # ── 旗舰模型：Opus ────────────────────────────────────────────────────────
+  - model_name: "claude-opus"
+    litellm_params:
+      model: "bedrock/converse/<OPUS_ARN>"
+      aws_access_key_id: "<AWS_AK>"
+      aws_secret_access_key: "<AWS_SK>"
+      aws_region_name: "us-west-2"
+      timeout: 600
+      stream_timeout: 30
+    model_info:
+      max_input_tokens: 1000000
+      max_output_tokens: 128000
+      context_window: 1000000
+
+general_settings:
+  master_key: "sk-hermes-bedrock-local"
+
+litellm_settings:
+  drop_params: true
+  num_retries: 2
+  request_timeout: 600
+```
 
 ---
 
-## 常见问题排查
+## 第七步：写入 LiteLLM 启动脚本
 
-报错 NoCredentialsError
-AWS 凭证没有生效。确认第五步的环境变量已经设置，并重新打开终端后再试。
+检查 `~/.hermes/litellm-proxy.sh` 是否已存在：
 
-litellm 命令找不到
-尝试用 python3 -m litellm 替代，或重新运行安装命令。
+```bash
+test -f ~/.hermes/litellm-proxy.sh && echo "EXISTS" || echo "MISSING"
+```
 
-hermes 报错 Connection refused
-LiteLLM 没有启动。先回到第六步启动它，再来配置 Hermes。
+若不存在，用 Write 工具写入：
 
-返回 AccessDeniedException
-AWS 账号没有开通 Bedrock 对应模型的访问权限。需要到 AWS 控制台 → Bedrock → 模型访问 → 申请开通对应的 Claude 模型。
+```bash
+#!/usr/bin/env bash
+CONFIG="$HOME/.hermes/litellm_config.yaml"
+PIDFILE="$HOME/.hermes/litellm.pid"
+LOGFILE="$HOME/.hermes/litellm.log"
+PORT=4000
+LITELLM_BIN="$(which litellm 2>/dev/null || echo "$HOME/.local/bin/litellm")"
 
-想换用其他模型（比如 Llama）
-在 ~/litellm/config.yaml 里参照已有格式添加新条目，model 字段换成 Bedrock 上对应的模型 ID。
+cmd_start() {
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        echo "LiteLLM 已在运行 (PID $(cat "$PIDFILE"))，端口 $PORT"
+        return 0
+    fi
+    echo "正在启动 LiteLLM 代理，端口 $PORT ..."
+    nohup "$LITELLM_BIN" --config "$CONFIG" --port "$PORT" > "$LOGFILE" 2>&1 &
+    local pid=$!
+    echo "$pid" > "$PIDFILE"
+    sleep 3
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "启动成功 (PID $pid)"
+    else
+        echo "启动失败，日志如下："
+        rm -f "$PIDFILE"
+        tail -20 "$LOGFILE"
+        return 1
+    fi
+}
+
+cmd_stop() {
+    if [ -f "$PIDFILE" ]; then
+        kill "$(cat "$PIDFILE")" 2>/dev/null && rm -f "$PIDFILE" && echo "已停止"
+    else
+        echo "未运行"
+    fi
+}
+
+cmd_status() {
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        echo "运行中 (PID $(cat "$PIDFILE"))，端口 $PORT"
+    else
+        echo "未运行"
+        return 1
+    fi
+}
+
+case "${1:-start}" in
+    start)   cmd_start ;;
+    stop)    cmd_stop ;;
+    status)  cmd_status ;;
+    restart) cmd_stop; sleep 1; cmd_start ;;
+    log)     tail -50 -f "$HOME/.hermes/litellm.log" ;;
+    *) echo "用法: $0 {start|stop|status|restart|log}" ;;
+esac
+```
+
+写入后执行：
+```bash
+chmod +x ~/.hermes/litellm-proxy.sh
+```
 
 ---
 
-## 整体链路说明
+## 第八步：配置 Hermes 指向 LiteLLM
 
-你 → Hermes → LiteLLM（本地 localhost:4000）→ AWS Bedrock → Claude 模型
+检查 `~/.hermes/config.yaml` 是否已有 litellm 自定义 provider：
 
-每次使用前，确保 LiteLLM 在后台运行即可直接使用 hermes 命令。
+```bash
+grep -q "name: litellm" ~/.hermes/config.yaml && echo "CONFIGURED" || echo "NEED_CONFIG"
+```
+
+若结果为 `NEED_CONFIG`，执行：
+```bash
+hermes config set model.provider custom:litellm
+hermes config set model.default claude-sonnet
+```
+
+然后检查 config.yaml 是否包含 `custom_providers` 块：
+```bash
+grep -q "custom_providers" ~/.hermes/config.yaml && echo "HAS_CUSTOM" || echo "NO_CUSTOM"
+```
+
+若结果为 `NO_CUSTOM`，用 StrReplace 或直接 Write 在 `~/.hermes/config.yaml` 末尾追加：
+```yaml
+custom_providers:
+  - name: litellm
+    base_url: http://localhost:4000/v1
+    api_key: sk-hermes-bedrock-local
+    model: claude-sonnet
+    models:
+      claude-opus: {}
+      claude-sonnet: {}
+      claude-haiku: {}
+```
+
+---
+
+## 第九步：启动代理并验证
+
+执行：
+```bash
+bash ~/.hermes/litellm-proxy.sh start
+```
+
+等待 3 秒后检查状态：
+```bash
+bash ~/.hermes/litellm-proxy.sh status
+```
+
+最后执行一次快速测试（-q 表示单次问答，不进入交互模式）：
+```bash
+hermes chat -q "请用一句话介绍你自己"
+```
+
+---
+
+## 完成后告知用户
+
+配置成功后，向用户说明：
+
+```
+✅ 安装配置完成！
+
+您现在可以使用以下方式使用 AI：
+- 打开终端，输入 hermes 即可开始对话
+- 默认使用 Claude Sonnet（速度和能力平衡）
+- 如需最强能力，输入 hermes --model claude-opus
+
+⚠️ 注意：每次重启电脑后需要重新启动 AI 代理。
+在终端输入以下命令启动：
+  bash ~/.hermes/litellm-proxy.sh start
+
+然后再输入 hermes 就可以开始使用了。
+```
+
+---
+
+## 异常处理
+
+| 问题 | 处理方式 |
+|---|---|
+| 安装脚本需要 sudo 密码 | 提示用户在终端输入开机密码（输入时不显示字符属正常） |
+| `hermes: command not found` | 执行 `source ~/.zshrc` 或 `source ~/.bashrc` |
+| LiteLLM 启动失败 | 读取 `~/.hermes/litellm.log` 末尾内容，分析原因 |
+| AWS 认证失败（403/401）| 请用户核对邮件里的 ak/sk 是否完整，有无多余空格 |
+| 端口 4000 被占用 | 执行 `lsof -i :4000` 查看占用进程，必要时用 `kill -9 <PID>` 释放 |
