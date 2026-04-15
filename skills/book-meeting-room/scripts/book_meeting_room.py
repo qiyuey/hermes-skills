@@ -258,6 +258,12 @@ def query_rooms(session, book_date, office_ids, page_size=100):
                 results[oid] = rooms
 
     if date_not_open and not results:
+        # 0:00-0:05 是黄金抢占窗口：系统 0 点更新预约数据，竞争者少
+        # 实测 type=5 普通会议室在此时段也可抢（无需等 09:30）
+        now = datetime.now()
+        if now.hour == 0 and now.minute < 5:
+            print(f"[*] 0点窗口放行：日期 {book_date} 系统返回未开放，但当前时间 {now.strftime('%H:%M')} 在黄金窗口内，继续尝试")
+            return []  # 返回空列表而非 None，让上层正常走"无可用房间"流程而不是 exit 2
         return None  # 信号：日期未开放
 
     # 按 office_ids 原始顺序拼接，保证优先级稳定
