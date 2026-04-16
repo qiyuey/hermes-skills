@@ -145,7 +145,49 @@ litellm --version
 
 ---
 
-## 第八步：写入 LiteLLM 配置文件
+## 第八步：安装 Caffeine（防止休眠）
+
+Hermes 在后台持续运行，电脑休眠会导致服务中断。安装 Caffeine 可以让屏幕锁定时保持后台服务正常工作。
+
+检查是否已安装：
+```bash
+brew list caffeine 2>/dev/null && echo "CAFFEINE_OK" || echo "CAFFEINE_MISSING"
+```
+
+若未安装（同时检查 Homebrew 是否存在）：
+```bash
+# 检查 Homebrew
+brew --version 2>/dev/null && echo "BREW_OK" || echo "BREW_MISSING"
+```
+
+- 若 Homebrew 已存在，直接执行：
+  ```bash
+  brew install --cask caffeine
+  ```
+- 若 Homebrew 未安装，先安装 Homebrew：
+  ```bash
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  ```
+  完成后再执行 `brew install --cask caffeine`。
+
+安装完成后告知用户：
+
+```
+☕ Caffeine 已安装！
+
+请按以下步骤启动它：
+1. 打开 Launchpad（F4 键或点击底部程序坞的火箭图标）
+2. 找到 Caffeine，点击打开
+3. 菜单栏右上角会出现一个咖啡杯图标 ☕
+4. 点击咖啡杯图标，让它变成"满杯"状态（激活）
+
+激活后电脑休眠时 Hermes 后台服务仍会正常运行。
+建议设置为开机自启：点击菜单栏咖啡杯 → Preferences → 勾选 "Launch at Login"
+```
+
+---
+
+## 第九步：写入 LiteLLM 配置文件
 
 根据用户提供的信息，用 Write 工具直接写入 `~/.hermes/litellm_config.yaml`。
 
@@ -212,7 +254,7 @@ litellm_settings:
 
 ---
 
-## 第九步：写入 LiteLLM 启动脚本
+## 第十步：写入 LiteLLM 启动脚本
 
 检查 `~/.hermes/litellm-proxy.sh` 是否已存在：
 
@@ -284,7 +326,7 @@ chmod +x ~/.hermes/litellm-proxy.sh
 
 ---
 
-## 第十步：配置 Hermes 指向 LiteLLM
+## 第十一步：配置 Hermes 指向 LiteLLM
 
 检查 `~/.hermes/config.yaml` 是否已有 litellm 自定义 provider：
 
@@ -318,7 +360,7 @@ custom_providers:
 
 ---
 
-## 第十一步：启动代理并验证
+## 第十二步：启动代理并验证
 
 执行：
 ```bash
