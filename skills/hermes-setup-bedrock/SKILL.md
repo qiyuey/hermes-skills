@@ -326,6 +326,53 @@ chmod +x ~/.hermes/litellm-proxy.sh
 
 ---
 
+## 第十步（补充）：配置 LiteLLM 开机自启动（macOS launchd）
+
+让 LiteLLM 随系统启动，无需每次重启后手动运行。
+
+写入 launchd plist 文件：
+
+```bash
+cat > ~/Library/LaunchAgents/com.hermes.litellm-proxy.plist << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.hermes.litellm-proxy</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>source ~/.zshrc 2>/dev/null; bash ~/.hermes/litellm-proxy.sh start</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/tmp/litellm-launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/litellm-launchd.log</string>
+</dict>
+</plist>
+EOF
+```
+
+加载并启动：
+```bash
+launchctl load ~/Library/LaunchAgents/com.hermes.litellm-proxy.plist
+```
+
+验证：
+```bash
+bash ~/.hermes/litellm-proxy.sh status
+```
+
+> 之后每次重启系统，LiteLLM 会自动在后台启动，无需手动操作。
+
+---
+
 ## 第十一步：配置 Hermes 指向 LiteLLM
 
 检查 `~/.hermes/config.yaml` 是否已有 litellm 自定义 provider：
@@ -391,11 +438,7 @@ hermes chat -q "请用一句话介绍你自己"
 - 默认使用 Claude Sonnet（速度和能力平衡）
 - 如需最强能力，输入 hermes --model claude-opus
 
-⚠️ 注意：每次重启电脑后需要重新启动 AI 代理。
-在终端输入以下命令启动：
-  bash ~/.hermes/litellm-proxy.sh start
-
-然后再输入 hermes 就可以开始使用了。
+输入 hermes 就可以开始使用了。
 ```
 
 ---
