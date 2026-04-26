@@ -1,151 +1,160 @@
 ---
 name: hermes-post-update
-description: Hermes 更新流程 — 通过 cron job 在后台执行，避免 gateway 重启中断当前会话。用户说"更新 hermes"或"帮我升级 hermes"时加载此 skill。
-version: 3.0.0
+description: Use when the user asks to update, upgrade, check, or troubleshoot Hermes Agent itself, especially from Telegram/WeChat gateway sessions.
+version: 4.0.0
 author: Hermes Agent
 metadata:
   hermes:
-    tags: [hermes, update, maintenance, post-update, doctor, changelog]
+    tags: [hermes, update, maintenance, gateway, cron, doctor, changelog]
     related_skills: [hermes-agent]
 ---
 
 # Hermes 更新流程
 
-用户说"更新 hermes"、"帮我升级 hermes"、"hermes 有新版本吗"时，**必须通过 cron job 在后台执行**，不能直接在当前会话中运行 `hermes update`。
+## 核心原则
 
-原因：`hermes update` 会重启 gateway 进程，导致当前会话中断，后续消息全部丢失。cron job 是独立子进程，不受 gateway 重启影响，完成后主动把结果 deliver 回用户。
+更新 Hermes 时要避免让当前 gateway 会话失联。先确认状态，再用**可恢复、可查看日志**的后台流程执行，最后验证版本与进程。
 
----
+## 触发条件
 
-## 首次运行：询问并创建定时任务
+用户说：
+- “更新 Hermes” / “升级 Hermes”
+- “Hermes 有新版本吗”
+- “检查 Hermes 更新”
+- “Hermes update 卡住/没回报/进展如何”
 
-检查是否已存在名为 `hermes-auto-update` 的 cron job（用 cronjob list 查看）。
+## 标准流程
 
-**如果不存在**，询问用户两个问题：
+### 1. 先检查现状
 
-1. 是否创建每日自动检查更新的定时任务？
-2. 更新报告发送到哪个渠道？列出当前会话上下文中已连接的平台供选择（如 Telegram、微信等），让用户选择或输入。
+立即运行：
 
-拿到用户确认后，创建 cron job：
-
-```
-cronjob(
-  action="create",
-  schedule="0 2 * * *",  # UTC 02:00 = 北京时间 10:00
-  repeat=forever,
-  deliver=<用户选择的渠道>,
-  name="hermes-auto-update",
-  prompt=<见下方 Cron Prompt 模板>
-)
+```bash
+hermes --version
+cd ~/.hermes/hermes-agent && git fetch origin main && git rev-parse --short HEAD && git rev-parse --short origin/main && git status --short
 ```
 
-**如果已存在**，跳过询问，直接触发一次性更新（见下方"立即执行一次更新"）。
+判断：
+- `HEAD == origin/main` 且 `hermes --version` 显示 `Up to date` → 汇报“已是最新”，不要再执行更新。
+- 有更新或版本命令提示 behind → 进入后台更新。
+- 有本地变更 → 记录变更摘要；不要手动清理，交给 `hermes update` 的 autostash，更新后复查 `git status`。
 
----
+### 2. 立即更新：优先用 cron 一次性任务
 
-## 立即执行一次更新
+创建一次性 cron job，**deliver 用 `origin`**，不要复用自动更新任务的 WeChat/Telegram 目的地，避免发错地方。
 
-无论是否创建了定时任务，用户当下请求更新时，都需要立刻触发一次更新。用 cron job 一次性执行：
-
-```
+```python
 cronjob(
   action="create",
   schedule="1m",
   repeat=1,
-  deliver=<用户选择的渠道，或已有定时任务的 deliver 渠道>,
+  deliver="origin",
   name="hermes-update-now",
-  prompt=<见下方 Cron Prompt 模板>
+  enabled_toolsets=["terminal"],
+  prompt=<下方 Immediate Update Prompt>
 )
 ```
 
-创建完后立刻回复用户：
-"已在后台启动更新，gateway 重启后会把结果发回来，稍等片刻。"
+创建后告诉用户：后台任务已创建，约 1 分钟后执行。
 
----
+### 3. 用户追问进展时
 
-## Cron Prompt 模板
+先查 cron 状态：
 
-以下 prompt 用于定时任务和一次性更新，必须自包含：
-
-```
-检查 Hermes 是否有新版本，有则执行更新，完成后汇报结果。
-
-## Step 1：记录当前 commit
-
-cd ~/.hermes/hermes-agent && git fetch origin main 2>&1 && git rev-parse HEAD && git rev-parse origin/main
-
-对比本地和远程 commit hash：
-- 相同 → 已是最新，静默结束，不发送报告。
-- 不同 → 继续执行后续步骤。
-
-## Step 2：执行更新
-
-yes | hermes update 2>&1
-
-捕获完整输出。
-
-## Step 3：获取更新日志
-
-gh release list --repo NousResearch/hermes-agent --limit 1
-
-取最新 release tag，然后：
-
-gh release view <tag> --repo NousResearch/hermes-agent
-
-从 release notes 中提取：
-- Highlights 部分，最多 5 条最重要的新功能
-- 关键 Bug 修复（影响日常使用的优先）
-
-## Step 4：运行健康诊断
-
-hermes doctor --fix 2>&1
-
-## Step 5：处理本地变更冲突
-
-分析 Step 2 的输出：
-- 无 CONFLICT → 记录"无冲突"
-- 有 CONFLICT → 分析冲突文件：
-  git diff "stash@{0}^1"..stash@{0} -- <file>
-  git diff HEAD~N..HEAD -- <file>
-  判断是否可以直接 drop stash，给出结论。
-
-## Step 6：发送报告
-
-整合成纯文本（不用 Markdown）：
-
-【Hermes 自动更新完成】
-
-更新时间：{当前时间}
-
-━━ 本地变更 ━━
-{无冲突 / stash 已自动恢复 / 具体冲突处理结果}
-
-━━ 健康诊断 ━━
-{doctor 摘要：修复项 + 剩余警告（忽略 tinker-atropos、rl、moa 相关警告）}
-
-━━ 本次更新亮点 ━━
-新功能：
-• {来自 gh release notes，最多 5 条}
-
-Bug 修复：
-• {影响日常使用的优先，最多 3 条}
-
-━━ 提示 ━━
-Gateway 已重启，新版本已生效。
+```python
+cronjob(action="list")
 ```
 
----
+若一次性任务仍是 `scheduled` 且 `last_run_at=null`：
+- 说明还没被 scheduler 执行，不要说“正在更新”。
+- 可以调用 `cronjob(action="run", job_id=...)` 触发下一 tick。
+- 如果用户明确要立刻执行，才启动 terminal 后台兜底，并把日志路径告诉用户。
 
-## 注意事项
+若 gateway 已重启或任务消失：
+- 用 `hermes --version`、`git rev-parse HEAD origin/main`、`git status --short` 复核实际结果。
+- 读取 `/tmp/hermes-update-*.log` 或任务 output 汇报。
 
-- hermes 安装目录：`~/.hermes/hermes-agent/`
-- 更新日志用 `gh release view` 读取，不用 git log
-- `hermes doctor --fix` 比单独跑 `hermes config migrate` 更完整
-- doctor Warning 大多不影响使用：tinker-atropos、rl、moa 相关警告可忽略
-- 配置文件和密钥不在 git 管控内，更新不影响
-- 定时任务 deliver 渠道由用户首次选择，不硬编码
+### 4. terminal 兜底流程
 
-## 修改 skill 后的同步流程
+仅在 cron 没跑、用户催进展、或 scheduler 异常时使用：
 
-本 skill 通过 symlink 由 `~/Code/hermes-skills` 仓库管理。
-修改后直接在仓库目录 commit + push 即可，详见 `hermes-skills-sync` skill。
+```bash
+log=/tmp/hermes-update-$(date +%Y%m%d-%H%M%S).log
+{
+  echo '=== before ==='
+  hermes --version || true
+  echo '=== update ==='
+  hermes update
+  echo '=== after ==='
+  hermes --version || true
+  echo '=== git ==='
+  cd ~/.hermes/hermes-agent && git rev-parse --short HEAD && git rev-parse --short origin/main && git status --short
+} 2>&1 | tee "$log"
+```
+
+注意：gateway 重启后，Hermes 的 background process 句柄可能丢失；最终以日志文件和 `hermes --version` 复核为准。
+
+## Immediate Update Prompt
+
+用于一次性更新 cron job，必须自包含：
+
+```text
+用户要求立即更新 Hermes Agent。请执行并汇报结果；不要再创建 cron job，不要调用 send_message。
+
+1. 记录更新前状态：
+   hermes --version
+   cd ~/.hermes/hermes-agent && git fetch origin main && git rev-parse --short HEAD && git rev-parse --short origin/main && git status --short
+
+2. 如果 HEAD 与 origin/main 相同，且 hermes --version 显示 Up to date：
+   直接用中文简洁汇报“已是最新”，附版本和 commit，然后结束。
+
+3. 如果需要更新：
+   运行 `hermes update`，完整捕获输出。不要用无限交互；如出现提示，使用默认确认。
+
+4. 更新后验证：
+   hermes --version
+   cd ~/.hermes/hermes-agent && git rev-parse --short HEAD && git rev-parse --short origin/main && git status --short
+
+5. 可选：如果 `gh` 可用，读取最新 release notes：
+   gh release list --repo NousResearch/hermes-agent --limit 1
+   gh release view <tag> --repo NousResearch/hermes-agent
+   只提取和日常使用相关的 3-5 条。
+
+6. 最终中文汇报：
+   - 是否成功
+   - 更新前后版本/commit
+   - 是否仍 behind
+   - 本地变更/autostash 是否恢复或有冲突
+   - 如失败，给关键错误和下一步
+```
+
+## 每日自动检查任务
+
+可以保留一个名为 `hermes-auto-update` 的 recurring cron job。它只负责每日检查；如果无更新，输出 `[SILENT]`，避免打扰。
+
+建议设置：
+- schedule: `0 10 * * *`（北京时间 10 点）
+- enabled_toolsets: `["terminal"]`
+- prompt 使用上面的逻辑，但无更新时最终只输出 `[SILENT]`。
+
+## 常见坑
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `skill_view("hermes-post-update")` 失败 | skill 目录名和 frontmatter name 不一致 | 给 `~/.hermes/skills/hermes-post-update` 建兼容 symlink |
+| cron 一次性任务没回报 | 还在 scheduled、gateway 重启、或任务被旧 scheduler 状态覆盖 | 先查 cron list，再用版本/git/log 复核实际状态 |
+| `hermes update` 后 process not_found | gateway 重启导致进程跟踪句柄丢失 | 读日志 + `hermes --version` 复核 |
+| update 提示 local changes restored | autostash 正常恢复本地改动 | 跑 `git status --short`，只在冲突时处理 |
+| `gh release` 不可用 | gh 未安装或未认证 | 跳过 release notes，不影响更新结论 |
+
+## 完成前验证
+
+必须至少验证：
+
+```bash
+hermes --version
+cd ~/.hermes/hermes-agent && git rev-parse --short HEAD && git rev-parse --short origin/main && git status --short
+ps -ef | grep -i '[h]ermes.*gateway' | head
+```
+
+汇报时不要只说“已启动”；要说明“已启动 / 已完成 / 已是最新 / 失败”的真实状态。
