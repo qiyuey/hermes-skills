@@ -145,6 +145,7 @@ log=/tmp/hermes-update-$(date +%Y%m%d-%H%M%S).log
 | cron 一次性任务没回报 | 还在 scheduled、gateway 重启、或任务被旧 scheduler 状态覆盖 | 先查 cron list，再用版本/git/log 复核实际状态 |
 | `hermes update` 后 process not_found | gateway 重启导致进程跟踪句柄丢失 | 读日志 + `hermes --version` 复核 |
 | update 提示 local changes restored | autostash 正常恢复本地改动 | 跑 `git status --short`，只在冲突时处理 |
+| 用户问“`.hermes` 是 git 仓库吗？”或要求清理更新残留 | `~/.hermes` 本身通常不是 git 仓库；源码仓库在 `~/.hermes/hermes-agent`，skills 可能 symlink 到 `~/Code/hermes-skills` | 先分别验证 `git rev-parse --show-toplevel`，只在确认的仓库根目录执行 `git restore`/删除 untracked；不要把 `~/.hermes` 根目录当仓库 |
 | `gh release` 不可用 | gh 未安装或未认证 | 跳过 release notes，不影响更新结论 |
 
 ## 完成前验证
