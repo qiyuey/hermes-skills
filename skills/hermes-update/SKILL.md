@@ -1,7 +1,7 @@
 ---
 name: hermes-post-update
 description: Use when the user asks to update, upgrade, check, or troubleshoot Hermes Agent itself, especially from Telegram/WeChat gateway sessions.
-version: 4.0.0
+version: 4.1.0
 author: Hermes Agent
 metadata:
   hermes:
@@ -115,23 +115,74 @@ log=/tmp/hermes-update-$(date +%Y%m%d-%H%M%S).log
    hermes --version
    cd ~/.hermes/hermes-agent && git rev-parse --short HEAD && git rev-parse --short origin/main && git status --short
 
-5. 恢复本地专属 patch（更新后必须检查）：
+5. 恢复本地专属 patches（更新后必须检查，不能只检查单个硬编码 patch）：
 
+   - 首选读取 `~/.hermes/local-patches/hermes-agent.yaml` 作为本机 patch 清单；这个文件在源码仓库外，能跨 `hermes update` 保留。
+   - 每个 patch 条目至少包含：`name`、`marker_file`、`marker_regex`、`commit_candidates`、`commit_message`。
+   - 对每个条目执行：
+     1. `grep -Eq "$marker_regex" "$marker_file"` 成功 → `PATCH_OK <name>`，跳过。
+     2. marker 缺失 → 按 `commit_candidates` 顺序找第一个存在的 commit/branch/ref。
+     3. 执行 `git cherry-pick <ref> --no-commit`，然后 `git commit -m "$commit_message"`。
+     4. 如 cherry-pick 冲突：停止后续 patch，汇报 `PATCH_CONFLICT <name>`、冲突文件、保留工作区等待人工处理；不要自动 abort。
+   - 如果 manifest 不存在，使用兼容 fallback：只检查 Bedrock ARN patch（marker: `GetInferenceProfile` in `agent/bedrock_adapter.py`），但汇报“未发现通用 patch manifest，建议补充”。
+
+   参考执行脚本：
+
+   ```bash
    cd ~/.hermes/hermes-agent
-   grep -q "GetInferenceProfile" agent/bedrock_adapter.py && echo "PATCH_OK" || echo "PATCH_MISSING"
-
-   - PATCH_OK → 跳过
-   - PATCH_MISSING → 执行恢复：
-
-   PATCH_COMMIT=$(git log feat/bedrock-application-inference-profile-arn-support --oneline 2>/dev/null | grep "application-inference-profile ARNs" | head -1 | awk '{print $1}')
-   if [ -z "$PATCH_COMMIT" ]; then
-     for h in 55735c123 5f6e04569; do
-       git cat-file -e "${h}^{commit}" 2>/dev/null && PATCH_COMMIT=$h && break
-     done
+   manifest="$HOME/.hermes/local-patches/hermes-agent.yaml"
+   if [ -f "$manifest" ]; then
+     python - <<'PY'
+import subprocess, sys, yaml, pathlib, re, os
+repo = pathlib.Path.home()/'.hermes/hermes-agent'
+manifest = pathlib.Path.home()/'.hermes/local-patches/hermes-agent.yaml'
+data = yaml.safe_load(manifest.read_text()) or {}
+patches = data.get('patches', [])
+for p in patches:
+    name = p['name']
+    marker_file = repo / p['marker_file']
+    marker_regex = p['marker_regex']
+    if marker_file.exists() and re.search(marker_regex, marker_file.read_text(errors='ignore'), re.M):
+        print(f'PATCH_OK {name}')
+        continue
+    ref = None
+    for cand in p.get('commit_candidates', []):
+        r = subprocess.run(['git','cat-file','-e',f'{cand}^{{commit}}'], cwd=repo)
+        if r.returncode == 0:
+            ref = cand; break
+    if not ref:
+        print(f'PATCH_MISSING_REF {name} candidates={p.get("commit_candidates", [])}')
+        sys.exit(2)
+    r = subprocess.run(['git','cherry-pick',ref,'--no-commit'], cwd=repo)
+    if r.returncode != 0:
+        subprocess.run(['git','diff','--name-only','--diff-filter=U'], cwd=repo)
+        print(f'PATCH_CONFLICT {name}')
+        sys.exit(r.returncode)
+    msg = p.get('commit_message') or f'local: re-apply {name} after update'
+    subprocess.check_call(['git','commit','-m',msg], cwd=repo)
+    print(f'PATCH_RESTORED {name} from {ref}')
+PY
+   else
+     echo "PATCH_MANIFEST_MISSING $manifest"
+     if grep -q "GetInferenceProfile" agent/bedrock_adapter.py; then
+       echo "PATCH_OK bedrock-application-inference-profile-arns"
+     else
+       PATCH_COMMIT=$(git log pr-16805-bedrock-arn --oneline 2>/dev/null | grep "application-inference-profile ARNs" | head -1 | awk '{print $1}')
+       if [ -z "$PATCH_COMMIT" ]; then
+         for h in 222e272ec 07c096e57 55735c123 5f6e04569; do
+           git cat-file -e "${h}^{commit}" 2>/dev/null && PATCH_COMMIT=$h && break
+         done
+       fi
+       if [ -n "$PATCH_COMMIT" ]; then
+         git cherry-pick "$PATCH_COMMIT" --no-commit && git commit -m "feat(bedrock): re-apply application-inference-profile ARN support after update"
+       else
+         echo "PATCH_MISSING_REF bedrock-application-inference-profile-arns"
+       fi
+     fi
    fi
-   git cherry-pick "$PATCH_COMMIT" --no-commit && git commit -m "feat(bedrock): re-apply application-inference-profile ARN support after update"
+   ```
 
-   汇报 patch 状态：PATCH_OK / 已恢复 / 冲突（列冲突文件）
+   汇报所有 patch 状态：`PATCH_OK` / `PATCH_RESTORED` / `PATCH_CONFLICT` / `PATCH_MISSING_REF`，并说明是否使用了 manifest 或 fallback。
 
 6. 可选：如果 `gh` 可用，读取最新 release notes：
    gh release list --repo NousResearch/hermes-agent --limit 1
