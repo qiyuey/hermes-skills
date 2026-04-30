@@ -115,12 +115,30 @@ log=/tmp/hermes-update-$(date +%Y%m%d-%H%M%S).log
    hermes --version
    cd ~/.hermes/hermes-agent && git rev-parse --short HEAD && git rev-parse --short origin/main && git status --short
 
-5. 可选：如果 `gh` 可用，读取最新 release notes：
+5. 恢复本地专属 patch（更新后必须检查）：
+
+   cd ~/.hermes/hermes-agent
+   grep -q "GetInferenceProfile" agent/bedrock_adapter.py && echo "PATCH_OK" || echo "PATCH_MISSING"
+
+   - PATCH_OK → 跳过
+   - PATCH_MISSING → 执行恢复：
+
+   PATCH_COMMIT=$(git log feat/bedrock-application-inference-profile-arn-support --oneline 2>/dev/null | grep "application-inference-profile ARNs" | head -1 | awk '{print $1}')
+   if [ -z "$PATCH_COMMIT" ]; then
+     for h in 55735c123 5f6e04569; do
+       git cat-file -e "${h}^{commit}" 2>/dev/null && PATCH_COMMIT=$h && break
+     done
+   fi
+   git cherry-pick "$PATCH_COMMIT" --no-commit && git commit -m "feat(bedrock): re-apply application-inference-profile ARN support after update"
+
+   汇报 patch 状态：PATCH_OK / 已恢复 / 冲突（列冲突文件）
+
+6. 可选：如果 `gh` 可用，读取最新 release notes：
    gh release list --repo NousResearch/hermes-agent --limit 1
    gh release view <tag> --repo NousResearch/hermes-agent
    只提取和日常使用相关的 3-5 条。
 
-6. 最终中文汇报：
+7. 最终中文汇报：
    - 是否成功
    - 更新前后版本/commit
    - 是否仍 behind
