@@ -109,7 +109,9 @@ log=/tmp/hermes-update-$(date +%Y%m%d-%H%M%S).log
    直接用中文简洁汇报“已是最新”，附版本和 commit，然后结束。
 
 3. 如果需要更新：
-   运行 `hermes update`，完整捕获输出。不要用无限交互；如出现提示，使用默认确认。
+   运行 `hermes update`，完整捕获输出。
+   - **不要用 `yes | hermes update`**，避免未来 hermes update 增加危险确认时误操作。
+   - 如出现普通确认提示，可接受默认确认；但绝对不要自动丢弃本地变更、不要 drop stash、不要 reset/clean。
 
 4. 更新后验证：
    hermes --version
@@ -157,6 +159,7 @@ for p in patches:
     if r.returncode != 0:
         subprocess.run(['git','diff','--name-only','--diff-filter=U'], cwd=repo)
         print(f'PATCH_CONFLICT {name}')
+        # 不要自动 abort/reset，保留现场等待人工处理
         sys.exit(r.returncode)
     msg = p.get('commit_message') or f'local: re-apply {name} after update'
     subprocess.check_call(['git','commit','-m',msg], cwd=repo)
