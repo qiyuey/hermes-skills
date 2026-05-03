@@ -249,12 +249,18 @@ PY
 
 ## 每日自动检查任务
 
-可以保留一个名为 `hermes-auto-update` 的 recurring cron job。它只负责每日检查；如果无更新，输出 `[SILENT]`，避免打扰。
+如果更新会重启 `hermes-gateway`，不要让 Hermes cron job 自己在 agent 进程里执行完整 `hermes update`：gateway 重启可能中断 cron session，导致 `last_run_at` 不写回、patch 恢复/验证步骤没跑完。
 
-建议设置：
-- schedule: `0 10 * * *`（北京时间 10 点）
-- enabled_toolsets: `["terminal"]`
-- prompt 使用上面的逻辑，但无更新时最终只输出 `[SILENT]`。
+推荐拆成两段：
+1. **外部 systemd user timer** 在 10:00 执行独立脚本（例如 `~/.hermes/scripts/hermes-auto-update-external.sh`）：检查版本、运行 `hermes update`、按 `~/.hermes/local-patches/hermes-agent.yaml` 恢复/验证本地 patches、写 `~/.hermes/state/auto-update/latest.json` 和日志。脚本必须用 lock 防重入，并把 `origin/main` 已包含在本地 patch commit 的情况视为 up-to-date，而不是要求 `HEAD == origin/main`。
+2. **Hermes cron reporter** 在 10:15 只读取状态文件并汇报：无更新输出 `[SILENT]`；有更新/失败才发消息。这个 cron 不再执行 update，所以不会被 gateway restart 打断。
+
+如果暂时不拆分，也可以保留一个名为 `hermes-auto-update` 的 recurring cron job，但要知道它在 gateway 重启时可能无法完成收尾。
+
+建议 reporter 设置：
+- schedule: `15 10 * * *`（北京时间 10:15）
+- script: `hermes-auto-update-report.py`
+- prompt：若脚本输出 `[SILENT]` 则最终严格输出 `[SILENT]`；JSON status=updated/failed 时简洁汇报版本、head/origin、git_status、log 路径。
 
 ### cron 自动更新投递坑：不要在投递前重启 gateway
 
