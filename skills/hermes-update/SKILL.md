@@ -117,23 +117,63 @@ log=/tmp/hermes-update-$(date +%Y%m%d-%H%M%S).log
    hermes --version
    cd ~/.hermes/hermes-agent && git rev-parse --short HEAD && git rev-parse --short origin/main && git status --short
 
-5. 本地专属 patches：
+5. 恢复本地专属 patches：
 
-   当前不需要任何本地 patch。历史上的 Bedrock application-inference-profile ARN patch 已废弃，因为本地 Hermes 统一使用公司 Model 平台（`custom:company_gpt` / `gpt-5.5`）。
+   - 首选读取 `~/.hermes/local-patches/hermes-agent.yaml` 作为本机 patch 清单；这个文件在源码仓库外，能跨 `hermes update` 保留。
+   - 当前允许的本地 patch 包括 WeCom 原生流式回复（`wecom-native-streaming-replies`）。历史 Bedrock application-inference-profile ARN patch 已废弃，不要恢复；如果 manifest 中出现 Bedrock ARN patch，将其移到 `~/.hermes/local-patches/disabled/` 并汇报。
+   - 每个非 Bedrock patch 条目至少包含：`name`、`marker_file`、`marker_regex`、`commit_candidates`、`commit_message`。
+   - 对每个非 Bedrock 条目执行：
+     1. `grep -Eq "$marker_regex" "$marker_file"` 成功 → `PATCH_OK <name>`，跳过。
+     2. marker 缺失 → 按 `commit_candidates` 顺序找第一个存在的 commit/branch/ref。
+     3. 执行 `git cherry-pick <ref> --no-commit`，然后 `git commit -m "$commit_message"`。
+     4. 如 cherry-pick 冲突：停止后续 patch，汇报 `PATCH_CONFLICT <name>`、冲突文件、保留工作区等待人工处理；不要自动 abort。
 
-   更新后只做检查，不要自动恢复 Bedrock ARN patch：
+   参考执行脚本：
 
    ```bash
    cd ~/.hermes/hermes-agent
-   if grep -RniE 'GetInferenceProfile|application-inference-profile' agent/bedrock_adapter.py agent/auxiliary_client.py hermes_cli/model_switch.py hermes_cli/models.py run_agent.py 2>/dev/null; then
-     echo "PATCH_STALE bedrock-application-inference-profile-arn-support"
-     echo "历史 Bedrock ARN patch 仍存在；不要 cherry-pick，汇报需要人工确认是否清理。"
+   manifest="$HOME/.hermes/local-patches/hermes-agent.yaml"
+   if [ -f "$manifest" ]; then
+     python - <<'PY'
+import subprocess, sys, yaml, pathlib, re, shutil
+repo = pathlib.Path.home()/'.hermes/hermes-agent'
+manifest = pathlib.Path.home()/'.hermes/local-patches/hermes-agent.yaml'
+disabled_dir = manifest.parent/'disabled'
+data = yaml.safe_load(manifest.read_text()) or {}
+patches = data.get('patches', [])
+for p in patches:
+    name = str(p.get('name') or '')
+    if 'bedrock' in name.lower() or 'application-inference-profile' in str(p).lower():
+        disabled_dir.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(manifest), str(disabled_dir/(manifest.name + '.disabled')))
+        print(f'PATCH_DISABLED_STALE {name}')
+        sys.exit(0)
+    marker_file = repo / p['marker_file']
+    marker_regex = p['marker_regex']
+    if marker_file.exists() and re.search(marker_regex, marker_file.read_text(errors='ignore'), re.M):
+        print(f'PATCH_OK {name}')
+        continue
+    ref = None
+    for cand in p.get('commit_candidates', []):
+        r = subprocess.run(['git','cat-file','-e',f'{cand}^{{commit}}'], cwd=repo)
+        if r.returncode == 0:
+            ref = cand; break
+    if not ref:
+        print(f'PATCH_MISSING_REF {name} candidates={p.get("commit_candidates", [])}')
+        sys.exit(2)
+    r = subprocess.run(['git','cherry-pick',ref,'--no-commit'], cwd=repo)
+    if r.returncode != 0:
+        subprocess.run(['git','diff','--name-only','--diff-filter=U'], cwd=repo)
+        print(f'PATCH_CONFLICT {name}')
+        sys.exit(r.returncode)
+    msg = p.get('commit_message') or f'local: re-apply {name} after update'
+    subprocess.check_call(['git','commit','-m',msg], cwd=repo)
+    print(f'PATCH_RESTORED {name} from {ref}')
+PY
    else
-     echo "PATCH_NONE no local patches required"
+     echo "PATCH_NONE no local patch manifest"
    fi
    ```
-
-   如果 `~/.hermes/local-patches/hermes-agent.yaml` 又出现且包含 Bedrock ARN patch，不要使用它；将其移到 `~/.hermes/local-patches/disabled/` 并汇报。
 
 6. 可选：如果 `gh` 可用，读取最新 release notes：
    gh release list --repo NousResearch/hermes-agent --limit 1
