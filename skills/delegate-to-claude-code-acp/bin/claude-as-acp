@@ -1,0 +1,410 @@
+#!/usr/bin/env node
+// claude-as-acp: thin ACP client wrapper for OpenClaw delegation.
+//
+// Usage:
+//   claude-as-acp [--resume <sid>] [--cwd <path>] "<prompt>"
+//
+// Outputs NDJSON to stdout (one JSON object per line).
+// First line is always {"type":"session","sessionId":"..."}.
+// Logs to /tmp/claude-as-acp.log for debug.
+
+import { spawn, spawnSync } from "node:child_process";
+import { Writable, Readable } from "node:stream";
+import { appendFileSync, existsSync, mkdirSync, writeFileSync, chmodSync, readdirSync, statSync } from "node:fs";
+import { join as pathJoin } from "node:path";
+import * as acp from "/usr/lib/node_modules/@agentclientprotocol/claude-agent-acp/node_modules/@agentclientprotocol/sdk/dist/acp.js";
+
+const LOG = "/tmp/claude-as-acp.log";
+const log = (msg) => { try { appendFileSync(LOG, `[${new Date().toISOString()}] [${process.pid}] ${msg}\n`); } catch {} };
+
+function emit(obj) {
+  const line = JSON.stringify(obj);
+  process.stdout.write(line + "\n");
+  log("OUT " + line.slice(0, 300));
+}
+
+// --- Parse args ---
+//
+// The wrapper presents exactly one user-facing knob to the main agent:
+//
+//     claude-as-acp --task <name> [--timeout <sec>] "<prompt>"
+//
+// Everything else (workdir, session id, resume vs new) is derived
+// deterministically from the task name. Same name = same session.
+// Different name = fresh session. The main agent's only decision is
+// what to call the task.
+//
+// Workdir rule:   /root/claudecode-workspace/<task>/
+// Transcript dir: /root/.claude/projects/-root-claudecode-workspace-<task>/
+// Both live on the persistent /root volume so they survive pod restart.
+const args = process.argv.slice(2);
+let task = null, prompt = null, timeoutSec = null;
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === "--task") { task = args[++i]; }
+  else if (args[i] === "--timeout") { timeoutSec = Number(args[++i]); }
+  else if (prompt === null) { prompt = args[i]; }
+}
+
+// Validate required args
+if (!task) {
+  emit({ type: "error", message: "missing --task arg. Usage: claude-as-acp --task <name> [--timeout <sec>] \"<prompt>\"" });
+  process.exit(2);
+}
+if (!prompt) {
+  emit({ type: "error", message: "missing prompt arg. Usage: claude-as-acp --task <name> [--timeout <sec>] \"<prompt>\"" });
+  process.exit(2);
+}
+
+// Task name validation: lowercase letters, digits, hyphens.
+// Must start with a letter or digit (not hyphen). 1-64 chars.
+// This keeps the derived workdir path safe and deterministic.
+if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(task)) {
+  emit({ type: "error", message: `invalid task name "${task}". Must match /^[a-z0-9][a-z0-9-]{0,63}$/ (lowercase, digits, hyphens; 1-64 chars; cannot start with hyphen).` });
+  process.exit(2);
+}
+
+// Derive workdir from task name and ensure it exists
+const WORKSPACE_ROOT = "/root/claudecode-workspace";
+const cwd = `${WORKSPACE_ROOT}/${task}`;
+try {
+  mkdirSync(cwd, { recursive: true });
+} catch (e) {
+  emit({ type: "error", message: `failed to create workdir ${cwd}: ${e?.message || e}` });
+  process.exit(2);
+}
+
+// Drop a workspace-level CLAUDE.md at WORKSPACE_ROOT if missing.
+//
+// Claude Code auto-discovers CLAUDE.md by walking up from its cwd.
+// Since all tasks live under /root/claudecode-workspace/<task>/, a single
+// CLAUDE.md at /root/claudecode-workspace/CLAUDE.md applies to every task
+// automatically — no need for main agent to include these rules in every
+// prompt, and no per-task duplication.
+//
+// Only written if missing (idempotent); if the user edits it, we leave it alone.
+try {
+  const workspaceClaudeMd = `${WORKSPACE_ROOT}/CLAUDE.md`;
+  if (!existsSync(workspaceClaudeMd)) {
+    const content = `# Claude Code 工作约定
+
+本机是 OpenClaw 容器。以下是关键路径约定,请严格遵守 —— 它们关系到你的生成物能否被 OpenClaw 正确加载和复用。
+
+## 1. Skill 产出位置
+
+当你要为 OpenClaw 创建 / 修改 skill(带 \`SKILL.md\` 的目录)时,**必须**写到:
+
+    ~/.openclaw/workspace/skills/<skill-name>/
+
+**不要**写到 \`~/.openclaw/skills/...\` 这类 git-synced 路径 —— 那些目录是从远端拉下来的,会被 \`init_skills.sh\` 覆盖,你写的东西会丢。
+
+## 2. OpenCLI 适配器位置
+
+当你要写 OpenCLI 的适配器(\`.ts\` 文件)时,**必须**直接写到:
+
+    ~/.opencli/clis/<provider-name>/<command>.ts
+
+**不要**先在当前工作目录下自己建 \`adapters/\` 再做 symlink —— 直接写到 \`~/.opencli/clis/\` 下,一步到位。
+
+## 3. 你的工作目录(这里)
+
+临时源码、构建产物、notes 可以自由组织在当前工作目录 \`/root/claudecode-workspace/<task>/\` 下。这个目录跟你的 task 名字一一对应,同 task 的多次对话共享同一个 cwd。
+
+但 skill 和 adapter 的**最终产物**必须按 §1 和 §2 的规则落位,否则 OpenClaw 那边看不到。
+
+## 4. 路径速记
+
+| 你要写什么 | 写到哪里 |
+|---|---|
+| OpenClaw skill (SKILL.md + 资源) | \`~/.openclaw/workspace/skills/<name>/\` |
+| OpenCLI 适配器 (.ts) | \`~/.opencli/clis/<provider>/\` |
+| 临时源码 / 构建 / 笔记 | 当前 cwd \`/root/claudecode-workspace/<task>/\` 下随便放 |
+`;
+    writeFileSync(workspaceClaudeMd, content);
+    log(`bootstrap: wrote default CLAUDE.md at ${workspaceClaudeMd}`);
+  }
+} catch (e) {
+  log("bootstrap: failed to write workspace CLAUDE.md: " + (e?.message || e));
+}
+
+// Derive Claude Code transcript directory using the CLI's canonical rule:
+// absolute path → replace "/" with "-" → "/root/.claude/projects/<replaced>"
+const cwdHash = cwd.replace(/\//g, "-");
+const projDir = "/root/.claude/projects/" + cwdHash;
+
+// Decide: resume the latest session in this task's transcript dir, or start fresh.
+// Because the workdir is bound to the task name 1:1, finding any existing jsonl
+// here means "same task, previous turn" — never a different task.
+let resumeSid = null;
+let resumedFrom = null;
+try {
+  if (existsSync(projDir)) {
+    const candidates = readdirSync(projDir)
+      .filter(f => f.endsWith(".jsonl"))
+      .map(f => {
+        try { return { f, mtime: statSync(pathJoin(projDir, f)).mtimeMs }; }
+        catch { return null; }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.mtime - a.mtime);
+    if (candidates.length > 0) {
+      resumeSid = candidates[0].f.replace(/\.jsonl$/, "");
+      resumedFrom = pathJoin(projDir, candidates[0].f);
+    }
+  }
+} catch (e) {
+  // swallow — fall through to fresh session
+}
+
+// --- Resolve effective timeout ---
+// Priority: --timeout CLI arg > CLAUDE_AS_ACP_MAX_SECONDS env > default 3300s
+// Default 3300s (55 min) is intentionally below the typical OpenClaw agent
+// turn timeout of 3600s (1 hour, from openclaw.json agents.defaults.timeoutSeconds),
+// giving a 5-minute buffer for wrapper to emit a clean "timeout" done event
+// and for main agent to produce a final reply before the outer agent turn fires.
+const envMax = Number(process.env.CLAUDE_AS_ACP_MAX_SECONDS);
+if (timeoutSec == null || !Number.isFinite(timeoutSec) || timeoutSec <= 0) {
+  timeoutSec = Number.isFinite(envMax) && envMax > 0 ? envMax : 3300;
+}
+
+log(`START task=${task} cwd=${cwd} resume=${resumeSid || "none"} prompt_len=${prompt.length} timeout=${timeoutSec}s`);
+emit({ type: "task", name: task, cwd, resuming: !!resumeSid });
+
+// --- Bootstrap: ensure ~/.aws/credentials has claude-profile ---
+// (idempotent; first invocation creates, subsequent are no-ops)
+try {
+  if (!existsSync("/root/.aws/credentials") && process.env.AWS_ACCESS_KEY_ID) {
+    mkdirSync("/root/.aws", { recursive: true });
+    writeFileSync("/root/.aws/credentials",
+      `[claude-profile]\naws_access_key_id = ${process.env.AWS_ACCESS_KEY_ID}\naws_secret_access_key = ${process.env.AWS_SECRET_ACCESS_KEY}\n`);
+    writeFileSync("/root/.aws/config",
+      `[profile claude-profile]\nregion = ${process.env.AWS_REGION || "us-west-2"}\n`);
+    chmodSync("/root/.aws/credentials", 0o600);
+    chmodSync("/root/.aws/config", 0o600);
+    log("bootstrap: wrote /root/.aws/credentials");
+  }
+} catch (e) { log("bootstrap error: " + e.message); }
+
+// --- Build env for claude-agent-acp subprocess ---
+// IS_SANDBOX=1 flips claude-agent-acp's ALLOW_BYPASS to true even when
+// running as root. Without it, bypassPermissions mode is silently removed
+// from the session's available modes list and the underlying claude CLI is
+// spawned without allowDangerouslySkipPermissions=true.
+// Ref: @agentclientprotocol/claude-agent-acp/dist/acp-agent.js:44
+//   const IS_ROOT = (process.geteuid?.() ?? process.getuid?.()) === 0;
+//   const ALLOW_BYPASS = !IS_ROOT || !!process.env.IS_SANDBOX;
+const childEnv = { ...process.env, IS_SANDBOX: "1" };
+
+// Force claude-agent-sdk to use the npm-managed claude CLI instead of whatever
+// is first on PATH. Some bots have an older static ELF binary shadowing the
+// npm-installed version at /usr/local/bin/claude (observed: 2.0.42 static vs
+// 2.1.109 from npm). CLAUDE_CODE_EXECUTABLE is honored by claude-agent-acp:
+// see acp-agent.js:749 "pathToClaudeCodeExecutable: process.env.CLAUDE_CODE_EXECUTABLE".
+for (const p of ["/usr/bin/claude", "/usr/local/bin/claude"]) {
+  try {
+    if (existsSync(p)) {
+      const out = spawnSync("/bin/sh", ["-c", `${p} --version 2>&1`]);
+      // prefer first path whose --version reports >= 2.1
+      const ver = out.stdout?.toString() || "";
+      const m = ver.match(/(\d+)\.(\d+)\./);
+      if (m && (Number(m[1]) > 2 || (Number(m[1]) === 2 && Number(m[2]) >= 1))) {
+        childEnv.CLAUDE_CODE_EXECUTABLE = p;
+        log(`picked CLAUDE_CODE_EXECUTABLE=${p} (version ${m[0]}x)`);
+        break;
+      }
+    }
+  } catch {}
+}
+
+// --- Spawn claude-agent-acp ---
+const proc = spawn("/usr/bin/claude-agent-acp", [], {
+  stdio: ["pipe", "pipe", "pipe"],
+  env: childEnv,
+});
+log(`spawned claude-agent-acp pid=${proc.pid}`);
+proc.stderr.on("data", (d) => log("STDERR " + d.toString().slice(0, 500)));
+
+let exited = false;
+proc.on("exit", (code, sig) => { exited = true; log(`acp exit code=${code} sig=${sig}`); });
+
+// --- Build ACP client ---
+class Client {
+  async requestPermission(params) {
+    const title = params.toolCall?.title || "(no title)";
+    log(`PERMISSION_REQUEST ${title}`);
+    // auto-approve: prefer allow_always, else first allow option
+    const opt = params.options.find(o => o.kind === "allow_always")
+             || params.options.find(o => o.kind === "allow_once")
+             || params.options[0];
+    log(`  auto-approve: ${opt.optionId}`);
+    emit({ type: "permission_auto_approved", tool: title, choice: opt.optionId });
+    return { outcome: { outcome: "selected", optionId: opt.optionId } };
+  }
+  async sessionUpdate(params) {
+    const u = params.update;
+    const t = u.sessionUpdate;
+    try {
+      if (t === "available_commands_update") return;
+      if (t === "agent_thought_chunk") return;  // hide thinking from user view
+      if (t === "agent_message_chunk") {
+        const text = u.content?.text || "";
+        if (text) emit({ type: "text", text });
+      } else if (t === "tool_call") {
+        emit({
+          type: "tool_call",
+          id: u.toolCallId,
+          name: u._meta?.claudeCode?.toolName || u.kind,
+          title: u.title || "",
+          status: u.status || "pending",
+        });
+      } else if (t === "tool_call_update") {
+        const resp = u._meta?.claudeCode?.toolResponse;
+        const out = {
+          type: "tool_update",
+          id: u.toolCallId,
+          status: u.status,
+        };
+        if (u.rawInput) out.input = u.rawInput;
+        if (u.title) out.title = u.title;
+        if (resp && typeof resp === "object") {
+          if (resp.stdout !== undefined) out.stdout = String(resp.stdout).slice(0, 2000);
+          if (resp.stderr) out.stderr = String(resp.stderr).slice(0, 500);
+          if (resp.type) out.resp_type = resp.type;
+          if (resp.filePath) out.path = resp.filePath;
+        }
+        if (u.rawOutput) out.raw_output = String(u.rawOutput).slice(0, 1000);
+        emit(out);
+      } else if (t === "usage_update") {
+        emit({
+          type: "usage",
+          cost_usd: u.cost?.amount,
+          used: u.used,
+          size: u.size,
+        });
+      }
+    } catch (e) { log("sessionUpdate error: " + e.message); }
+  }
+  async writeTextFile() { return {}; }
+  async readTextFile() { return { content: "" }; }
+}
+
+const stream = acp.ndJsonStream(Writable.toWeb(proc.stdin), Readable.toWeb(proc.stdout));
+const conn = new acp.ClientSideConnection(() => new Client(), stream);
+
+// --- Run: initialize, newSession or loadSession, prompt, done ---
+let stopReason = null, usage = null, errMsg = null;
+// hoist sessionId so the done event at the bottom can echo it
+let sessionId = null;
+try {
+  await conn.initialize({
+    protocolVersion: acp.PROTOCOL_VERSION,
+    clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } },
+  });
+  log("initialize ok");
+
+  let sessionMeta;
+  if (resumeSid) {
+    log(`loadSession(${resumeSid})`);
+    try {
+      sessionMeta = await conn.loadSession({ sessionId: resumeSid, cwd, mcpServers: [] });
+      sessionId = sessionMeta?.sessionId || resumeSid;
+      emit({ type: "session", sessionId, resumed: true });
+    } catch (e) {
+      log("loadSession failed, falling back to new: " + e.message);
+      emit({ type: "warning", message: `resume failed: ${e.message}; starting new session` });
+      sessionMeta = await conn.newSession({ cwd, mcpServers: [] });
+      sessionId = sessionMeta.sessionId;
+      emit({ type: "session", sessionId, resumed: false });
+    }
+  } else {
+    sessionMeta = await conn.newSession({ cwd, mcpServers: [] });
+    sessionId = sessionMeta.sessionId;
+    emit({ type: "session", sessionId, resumed: false });
+  }
+  log(`sessionId=${sessionId}`);
+
+  // --- Elevate session to most permissive mode available ---
+  // New sessions start in `default` mode which prompts for file edits.
+  // We try setSessionMode with the most permissive ids in order; acp-agent.js
+  // enumerates availableModes dynamically based on IS_SANDBOX/root.
+  // With IS_SANDBOX=1 set above, `bypassPermissions` should be available even
+  // as root. This disables all tool permission prompts for the session.
+  const preferredModes = ["bypassPermissions", "acceptEdits", "auto"];
+  const availableIds = (sessionMeta?.modes?.availableModes || []).map(m => m.id);
+  log(`availableModes=${JSON.stringify(availableIds)} currentMode=${sessionMeta?.modes?.currentModeId}`);
+  for (const modeId of preferredModes) {
+    if (!availableIds.includes(modeId)) continue;
+    try {
+      await conn.setSessionMode({ sessionId, modeId });
+      log(`setSessionMode -> ${modeId} ok`);
+      emit({ type: "mode_set", mode: modeId });
+      break;
+    } catch (e) {
+      log(`setSessionMode(${modeId}) failed: ${e.message}`);
+    }
+  }
+
+  // --- Wrapper-level timeout: fire conn.cancel() if prompt runs too long ---
+  // This is a soft timeout: cancel flows through the ACP protocol so the
+  // session survives (cancel test in phase4 validation confirmed this),
+  // Claude Code emits a result with stopReason=cancelled, we capture that
+  // outcome, emit a clean done event, and exit 1 so caller knows it didn't
+  // finish normally. The JSONL file is consistent at the cut point so the
+  // next --resume can pick up where we left off.
+  let timedOut = false;
+  const timeoutHandle = setTimeout(async () => {
+    timedOut = true;
+    log(`WRAPPER_TIMEOUT after ${timeoutSec}s, calling conn.cancel`);
+    emit({ type: "wrapper_timeout", after_seconds: timeoutSec });
+    try {
+      await conn.cancel({ sessionId });
+    } catch (e) {
+      log("conn.cancel failed: " + (e?.message || e));
+    }
+  }, timeoutSec * 1000);
+
+  try {
+    const res = await conn.prompt({
+      sessionId,
+      prompt: [{ type: "text", text: prompt }],
+    });
+    stopReason = res.stopReason;
+    usage = res.usage;
+    log(`prompt done stopReason=${stopReason} usage=${JSON.stringify(usage)}`);
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+
+  if (timedOut) {
+    errMsg = errMsg || `wrapper timeout after ${timeoutSec}s`;
+  }
+} catch (e) {
+  errMsg = e?.message || String(e);
+  log("FATAL " + errMsg + " " + (e?.stack || ""));
+  emit({ type: "error", message: errMsg });
+}
+
+// Build a next-call hint. In the task-based model there's exactly one thing
+// to remember: the task name. So the hint is trivially "same task name again".
+const nextHint = `claude-as-acp --task ${task} "<next prompt>"`;
+
+emit({
+  type: "done",
+  stop_reason: stopReason,
+  usage,
+  error: errMsg,
+  task,
+  session_id: sessionId,
+  next_call_hint: nextHint,
+});
+
+// --- Clean shutdown: close stdin, wait for acp to exit, cascade cleans child ---
+try { proc.stdin.end(); } catch {}
+for (let i = 0; i < 10 && !exited; i++) {
+  await new Promise(r => setTimeout(r, 200));
+}
+if (!exited) {
+  log("acp did not exit within 2s; force killing");
+  try { proc.kill(); } catch {}
+}
+log(`EXIT clean=${exited}`);
+process.exit(errMsg ? 1 : 0);
