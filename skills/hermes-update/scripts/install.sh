@@ -35,7 +35,27 @@ SCRIPTS_DEST="$HERMES_HOME/scripts"
 LOCAL_PATCHES_DIR="$HERMES_HOME/local-patches"
 LOCAL_PATCHES_FILE="$LOCAL_PATCHES_DIR/hermes-agent.yaml"
 HERMES_AGENT_REPO="$HERMES_HOME/hermes-agent"
-SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
+AUTO_UPDATE_LOG_DIR="$HERMES_HOME/logs/auto-update"
+
+# Per-OS scheduler paths.  systemd --user is preferred on Linux; macOS uses
+# a per-user LaunchAgent.  Other Unixes (FreeBSD/OpenBSD) fall through to a
+# no-op and the installer just prints a manual-registration hint.
+OS_KIND="$(uname -s)"
+case "$OS_KIND" in
+  Linux)
+    SCHEDULER="systemd"
+    SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
+    ;;
+  Darwin)
+    SCHEDULER="launchd"
+    LAUNCHD_AGENTS_DIR="$HOME/Library/LaunchAgents"
+    LAUNCHD_PLIST_LABEL="com.hermes.auto-update"
+    LAUNCHD_PLIST_PATH="$LAUNCHD_AGENTS_DIR/$LAUNCHD_PLIST_LABEL.plist"
+    ;;
+  *)
+    SCHEDULER="manual"
+    ;;
+esac
 
 FORCE=0
 APPLY_PATCHES=0
@@ -111,6 +131,30 @@ install_unit() {
   fi
   log "installing systemd unit: $dest"
   install -m 0644 "$src" "$dest"
+}
+
+install_launchd_plist() {
+  local src="$1" dest="$2"
+  if [ -e "$dest" ] && [ "$FORCE" -eq 0 ]; then
+    log "LaunchAgent plist present, leaving alone: $dest"
+    return
+  fi
+  log "installing LaunchAgent plist: $dest"
+  # Render the template's __SCRIPT__ / __LOG_DIR__ placeholders into the
+  # destination plist.  We avoid `sed -i` because BSD sed and GNU sed
+  # disagree about its argument syntax; a python rewrite is portable.
+  python3 - "$src" "$dest" "$SCRIPTS_DEST/hermes-auto-update-external.sh" "$AUTO_UPDATE_LOG_DIR" <<'PY'
+import sys, pathlib
+src = pathlib.Path(sys.argv[1])
+dest = pathlib.Path(sys.argv[2])
+script = sys.argv[3]
+logdir = sys.argv[4]
+text = src.read_text()
+text = text.replace("__SCRIPT__", script)
+text = text.replace("__LOG_DIR__", logdir)
+dest.write_text(text)
+PY
+  chmod 0644 "$dest"
 }
 
 seed_local_patches() {
@@ -208,6 +252,43 @@ enable_systemd_timer() {
   systemctl --user daemon-reload
   systemctl --user enable --now hermes-auto-update.timer
   systemctl --user list-timers hermes-auto-update.timer --no-pager 2>/dev/null || true
+}
+
+enable_launchd_agent() {
+  if ! command -v launchctl >/dev/null 2>&1; then
+    warn "launchctl not available; skipping LaunchAgent activation"
+    return
+  fi
+  local uid
+  uid="$(id -u)"
+  local domain="gui/$uid"
+  # `bootstrap` registers the plist with launchd; if it's already loaded we
+  # bootout-then-bootstrap to pick up any edits.  `bootout` returns non-zero
+  # when the service isn't loaded, which we tolerate.
+  if launchctl print "$domain/$LAUNCHD_PLIST_LABEL" >/dev/null 2>&1; then
+    log "reloading LaunchAgent (bootout + bootstrap): $LAUNCHD_PLIST_LABEL"
+    launchctl bootout "$domain/$LAUNCHD_PLIST_LABEL" 2>/dev/null || true
+  else
+    log "loading LaunchAgent: $LAUNCHD_PLIST_LABEL"
+  fi
+  if ! launchctl bootstrap "$domain" "$LAUNCHD_PLIST_PATH"; then
+    warn "launchctl bootstrap failed; load manually with:"
+    warn "  launchctl bootstrap gui/$uid $LAUNCHD_PLIST_PATH"
+    return
+  fi
+  launchctl enable "$domain/$LAUNCHD_PLIST_LABEL" 2>/dev/null || true
+  # Show next scheduled fire time for visibility; print is verbose, grep just
+  # the lines that humans usually care about.
+  launchctl print "$domain/$LAUNCHD_PLIST_LABEL" 2>/dev/null \
+    | awk '/^	(state|next run|last exit code)/' || true
+}
+
+enable_scheduler() {
+  case "$SCHEDULER" in
+    systemd) enable_systemd_timer ;;
+    launchd) enable_launchd_agent ;;
+    manual)  warn "unknown OS ($OS_KIND); start hermes-auto-update-external.sh from your own scheduler" ;;
+  esac
 }
 
 print_cron_registration_hint() {
@@ -309,7 +390,9 @@ EOF
       ;;
   esac
 
-  cat <<'EOF'
+  case "$SCHEDULER" in
+    systemd)
+      cat <<'EOF'
 3. Manually trigger one external run to verify end-to-end:
 
      systemctl --user start hermes-auto-update.service
@@ -318,18 +401,45 @@ EOF
 
 ============================================================
 EOF
+      ;;
+    launchd)
+      cat <<EOF
+3. Manually trigger one external run to verify end-to-end:
+
+     launchctl kickstart -k gui/\$(id -u)/$LAUNCHD_PLIST_LABEL
+     tail -n 100 $AUTO_UPDATE_LOG_DIR/launchd.stderr.log
+     cat $HERMES_HOME/state/auto-update/latest.json
+
+   Inspect the agent state any time:
+
+     launchctl print gui/\$(id -u)/$LAUNCHD_PLIST_LABEL | head -50
+
+============================================================
+EOF
+      ;;
+    *)
+      cat <<EOF
+3. This OS ($OS_KIND) has no scheduler integration in install.sh; wire
+   $SCRIPTS_DEST/hermes-auto-update-external.sh into your preferred timer
+   (cron/at/...) and verify it writes $HERMES_HOME/state/auto-update/latest.json.
+
+============================================================
+EOF
+      ;;
+  esac
 }
 
 main() {
   log "skill dir:       $SKILL_DIR"
   log "scripts source:  $SCRIPTS_SRC"
   log "hermes home:     $HERMES_HOME"
+  log "os kind:         $OS_KIND"
+  log "scheduler:       $SCHEDULER"
   log "force mode:      $FORCE"
 
   ensure_dir "$SCRIPTS_DEST"
   ensure_dir "$LOCAL_PATCHES_DIR"
-  ensure_dir "$SYSTEMD_USER_DIR"
-  ensure_dir "$HERMES_HOME/logs/auto-update"
+  ensure_dir "$AUTO_UPDATE_LOG_DIR"
   ensure_dir "$HERMES_HOME/state/auto-update"
 
   install_symlink "$SCRIPTS_SRC/hermes-local-patches.py"            "$SCRIPTS_DEST/hermes-local-patches.py"
@@ -338,14 +448,26 @@ main() {
 
   install_wrapper "$TEMPLATES/hermes-auto-update-report.wrapper.py" "$SCRIPTS_DEST/hermes-auto-update-report.py"
 
-  install_unit "$TEMPLATES/hermes-auto-update.service" "$SYSTEMD_USER_DIR/hermes-auto-update.service"
-  install_unit "$TEMPLATES/hermes-auto-update.timer"   "$SYSTEMD_USER_DIR/hermes-auto-update.timer"
+  case "$SCHEDULER" in
+    systemd)
+      ensure_dir "$SYSTEMD_USER_DIR"
+      install_unit "$TEMPLATES/hermes-auto-update.service" "$SYSTEMD_USER_DIR/hermes-auto-update.service"
+      install_unit "$TEMPLATES/hermes-auto-update.timer"   "$SYSTEMD_USER_DIR/hermes-auto-update.timer"
+      ;;
+    launchd)
+      ensure_dir "$LAUNCHD_AGENTS_DIR"
+      install_launchd_plist "$TEMPLATES/com.hermes.auto-update.plist" "$LAUNCHD_PLIST_PATH"
+      ;;
+    manual)
+      warn "scheduler unit installation skipped on this OS ($OS_KIND)"
+      ;;
+  esac
 
   seed_local_patches
 
   check_or_apply_skip_restart_patch
 
-  enable_systemd_timer
+  enable_scheduler
 
   print_cron_registration_hint
 }

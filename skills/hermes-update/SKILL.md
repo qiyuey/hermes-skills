@@ -218,17 +218,22 @@ uv pip install -e . \
 
 如果更新会重启 `hermes-gateway`，不要让 Hermes cron job 自己在 agent 进程里执行完整 `hermes update`：gateway 重启可能中断 cron session，导致 `last_run_at` 不写回、patch 恢复/验证步骤没跑完。
 
-当前实现使用 systemd user timer（**不是** Hermes 内部 cron），完全独立于 gateway：
+当前实现把 `hermes update` 放到 **OS 级 timer**（独立于 gateway）：
 
-1. **systemd user timer** `hermes-auto-update.timer` 在 10:00 触发 `hermes-auto-update.service`，跑 `~/.hermes/scripts/hermes-auto-update-external.sh`。该脚本顺序：
-   - flock 防重入
+1. **外部 timer**：
+   - **Linux** — systemd user timer `hermes-auto-update.timer` → `hermes-auto-update.service`，每天 17:00（`OnCalendar` 可改）触发 `~/.hermes/scripts/hermes-auto-update-external.sh`。
+   - **macOS** — LaunchAgent `~/Library/LaunchAgents/com.hermes.auto-update.plist`（label `com.hermes.auto-update`），`StartCalendarInterval` 同样设到 17:00 触发同一份 `hermes-auto-update-external.sh`。`StartCalendarIntervalCoalesce=true` 等效 systemd 的 `Persistent=true`，错过点位机器唤醒后会补跑一次。
+
+2. **`hermes-auto-update-external.sh` 流程**（两个平台共用一份）：
+   - 锁防重入（Linux 用 `flock(1)`，macOS 用脚本内置的 `mkdir(2)` 锁 polyfill）
    - 启用 git rerere 记忆冲突解决
    - 跑 `hermes-local-patches.py recover`（commit autostash 残留）
-   - `HERMES_UPDATE_SKIP_GATEWAY_RESTART=1 hermes update --yes`
+   - `HERMES_UPDATE_SKIP_GATEWAY_RESTART=1 hermes update --yes`（macOS 上脚本顶部还 polyfill 了 `timeout(1)` 和 `date -Is`）
    - 跑 `hermes-local-patches.py apply`（cherry-pick 缺失 patch；冲突不会中断）
    - 写状态到 `~/.hermes/state/auto-update/latest.json` + 日志到 `~/.hermes/logs/auto-update/<run_id>.log`
    - 启动 `hermes-auto-update-restart-gateway.sh` 异步等 180 秒后再重启 gateway，避开投递竞态。
-2. **Hermes cron reporter** `hermes-auto-update-report.py` 在 10:15 只读取 `latest.json` 并汇报：无更新输出 `[SILENT]`；有更新/失败/patch_failed 才发消息。这个 cron 不再执行 update，所以不会被 gateway restart 打断。
+
+3. **Hermes cron reporter** `hermes-auto-update-report.py`：在 17:15 只读取 `latest.json` 并汇报：无更新输出 `[SILENT]`；有更新/失败/patch_failed 才发消息。这个 cron 不再执行 update，所以不会被 gateway restart 打断。
 
 修改了什么不要忘了：
 - 把 `HERMES_UPDATE_SKIP_GATEWAY_RESTART` 本地 patch 记录进 `~/.hermes/local-patches/hermes-agent.yaml`，否则 upstream update 可能覆盖该能力。
@@ -238,6 +243,8 @@ uv pip install -e . \
 - `~/.hermes/state/auto-update/latest.json` 中 `status` 和 `patch_report`（patch 引擎完整 stdout）。
 - `~/.hermes/logs/auto-update/<run_id>.log` 完整 update 日志。
 - `~/.hermes/logs/auto-update/<run_id>.patches.txt` 仅 patch 阶段的 stdout。
+- **Linux**: `journalctl --user -u hermes-auto-update.service -e --no-pager | tail`
+- **macOS**: `~/.hermes/logs/auto-update/launchd.stderr.log` 和 `launchctl print gui/$(id -u)/com.hermes.auto-update | head -50`（关注 `state` / `next run` / `last exit code`）
 - `hermes cron list --all` 的 `last_delivery_error`（如果 reporter 投递失败）。
 
 本机实现细节见 `references/cron-auto-update-delivery.md`。
@@ -252,6 +259,8 @@ uv pip install -e . \
 | `~/.hermes/scripts/hermes-auto-update-external.sh` | symlink | `…/hermes-update/scripts/hermes-auto-update-external.sh` |
 | `~/.hermes/scripts/hermes-auto-update-restart-gateway.sh` | symlink | `…/hermes-update/scripts/hermes-auto-update-restart-gateway.sh` |
 | `~/.hermes/scripts/hermes-auto-update-report.py` | **real wrapper** | `runpy.run_path(…/hermes-update/scripts/hermes-auto-update-report.py)` |
+| `~/.config/systemd/user/hermes-auto-update.{service,timer}` | rendered (Linux) | `…/hermes-update/scripts/templates/hermes-auto-update.{service,timer}` |
+| `~/Library/LaunchAgents/com.hermes.auto-update.plist` | rendered (macOS) | `…/hermes-update/scripts/templates/com.hermes.auto-update.plist`（`__SCRIPT__` / `__LOG_DIR__` 由 install.sh 替换为绝对路径） |
 
 为什么 reporter 用 wrapper 而不是 symlink：`hermes-agent/cron/scheduler.py::_run_job_script` 调用 `path.resolve()` 后做 `relative_to(scripts_dir_resolved)` 检查，故意拒绝 symlink 逃逸出 `~/.hermes/scripts/` 的脚本。Cron job `c6b8487f8eb5`（`hermes-auto-update-report`）的 `script` 字段必须是真正落在 `scripts_dir` 内的文件，所以这里留一个 4 行的 wrapper，让真实逻辑仍然在 repo 里。
 
@@ -261,14 +270,14 @@ uv pip install -e . \
 
 ## 全新机器安装
 
-整套自动更新包括 4 个脚本 + 1 个 wrapper + 2 个 systemd unit + 1 个 cron job + 1 份 local-patches manifest + 1 个 hermes-agent 上的 patch。在一台干净的 Hermes 上启用：
+整套自动更新包括 4 个脚本 + 1 个 wrapper + scheduler unit（Linux 2 个 systemd unit / macOS 1 个 LaunchAgent plist）+ 1 个 cron job + 1 份 local-patches manifest + 1 个 hermes-agent 上的 patch。在一台干净的 Hermes 上启用：
 
 ```bash
 # 1. 拉仓库 + 让 hermes-skills-sync 把所有 skill symlink 到 ~/.hermes/skills/
 gh repo clone qiyuey/hermes-skills "$HOME/Code/hermes-skills"
 # 然后让 hermes-skills-sync skill 跑一遍场景一
 
-# 2. 安装自动更新粘合层（symlink / wrapper / systemd unit / local-patches 模板）
+# 2. 安装自动更新粘合层（symlink / wrapper / scheduler unit / local-patches 模板）
 #    --apply-patches 让 install.sh 直接 git am 仓库里 patches/ 下的 patch，
 #    并把生成的 commit SHA 自动回填到 manifest
 "$HOME/Code/hermes-skills/skills/hermes-update/scripts/install.sh" --apply-patches
@@ -277,10 +286,19 @@ gh repo clone qiyuey/hermes-skills "$HOME/Code/hermes-skills"
 #    （cron job 必须通过 hermes 接口创建，install.sh 不能直接改 jobs.json）
 ```
 
+`install.sh` 通过 `uname -s` 选择 scheduler：
+
+| 平台 | scheduler | 装到哪里 | 激活命令 |
+|---|---|---|---|
+| Linux | systemd --user | `~/.config/systemd/user/hermes-auto-update.{service,timer}` | `systemctl --user enable --now hermes-auto-update.timer` |
+| macOS | launchd | `~/Library/LaunchAgents/com.hermes.auto-update.plist` | `launchctl bootstrap gui/$(id -u) <plist>` |
+| 其他 Unix | manual | —— | 自己调度 `hermes-auto-update-external.sh` |
+
 `install.sh` 是**幂等**的：
-- 已存在的 symlink / wrapper / systemd unit 不会被覆盖
+- 已存在的 symlink / wrapper / systemd unit / LaunchAgent plist 不会被覆盖
 - 已存在的 local-patches manifest 不会被改写
 - hermes-agent 里 marker 已经在 HEAD 时，patch 不会重复 `git am`
+- macOS 上重复跑 `install.sh --force` 会 bootout 再 bootstrap LaunchAgent，等效 systemd 的 `daemon-reload`
 
 不带 `--apply-patches` 也安全，install.sh 会检测 marker 缺失并在 NEXT STEPS 里给出你要手工跑的 `git am` 命令；带上 `--apply-patches` 则一步到位（同时还会把 manifest 的 `REPLACE_WITH_YOUR_COMMIT_SHORT_SHA` 占位符替换成新生成的 commit short SHA）。
 
@@ -329,6 +347,9 @@ gh repo clone qiyuey/hermes-skills "$HOME/Code/hermes-skills"
 | 用户问"`.hermes` 是 git 仓库吗？"或要求清理更新残留 | `~/.hermes` 本身通常不是 git 仓库；源码仓库在 `~/.hermes/hermes-agent`，skills 可能 symlink 到 `~/Code/hermes-skills` | 先分别验证 `git rev-parse --show-toplevel`，只在确认的仓库根目录执行 `git restore`/删除 untracked；不要把 `~/.hermes` 根目录当仓库 |
 | `gh release` 不可用 | gh 未安装或未认证 | 跳过 release notes，不影响更新结论 |
 | **hermes update 依赖安装失败：setuptools / croniter / python-dateutil 被 exclude-newer 过滤** | `pyproject.toml` 中 `exclude-newer = "7 days"` + aliyun 镜像时间戳陈旧 | 见上方"依赖安装失败时的修复"，详见 `references/uv-exclude-newer-workaround.md` |
+| `hermes-local-patches.py` 报 `PATCH_MANIFEST_ERROR pyyaml not installed` | 系统 `/usr/bin/env python3` 解析到的解释器没装 pyyaml（macOS 上 brew Python 常态） | `pip3 install --user --break-system-packages pyyaml`（macOS）或对应发行版的 `python3-yaml` 包（Linux） |
+| macOS 上 `launchctl bootstrap` 报 `Service is disabled` | 之前 `launchctl disable` 过，或 SIP / TCC 拒绝 | 先 `launchctl enable gui/$(id -u)/com.hermes.auto-update`，再 `launchctl bootstrap …` |
+| macOS 上 stale lock：`~/.hermes/state/auto-update/update.lock.d` 没被清理 | 上一次 external.sh 被 SIGKILL 或断电杀掉，mkdir 锁没机会 trap 释放 | `rmdir ~/.hermes/state/auto-update/update.lock.d`；下一次 timer 触发会自动恢复 |
 
 ## 完成前验证
 
