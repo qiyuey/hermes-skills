@@ -84,6 +84,14 @@ def _file_text_in_worktree(path: pathlib.Path) -> str:
 
 
 def _unstaged_files() -> List[str]:
+    """Return tracked files with staged or worktree modifications.
+
+    Untracked entries (``??``) are intentionally excluded: they can never
+    interfere with ``git cherry-pick`` of a patch that only touches tracked
+    files, but they routinely arise in everyday Hermes repos (notebooks
+    under ``tinker-atropos/``, etc.).  Including them caused every patch to
+    abort with a bogus ``working_tree_dirty`` conflict on macOS dev boxes.
+    """
     cp = _git("status", "--porcelain")
     if cp.returncode != 0:
         return []
@@ -91,7 +99,10 @@ def _unstaged_files() -> List[str]:
     for line in cp.stdout.splitlines():
         if not line or len(line) < 4:
             continue
-        # Format: "XY <path>" — X = staged, Y = worktree
+        # Format: "XY <path>" — X = staged, Y = worktree.  "??" means
+        # untracked and is safe to ignore for dirtiness checks.
+        if line[:2] == "??":
+            continue
         out.append(line[3:].strip())
     return out
 
