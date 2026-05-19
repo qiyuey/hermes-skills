@@ -232,7 +232,7 @@ uv pip install -e . \
 
 修改了什么不要忘了：
 - 把 `HERMES_UPDATE_SKIP_GATEWAY_RESTART` 本地 patch 记录进 `~/.hermes/local-patches/hermes-agent.yaml`，否则 upstream update 可能覆盖该能力。
-- `~/.hermes/scripts/` 三个脚本（`hermes-local-patches.py`、`hermes-auto-update-external.sh`、`hermes-auto-update-restart-gateway.sh`）属于 ~/.hermes 而**不是** repo，跨 update 自动保留。
+- 自动更新所有脚本的**源文件**都在 `~/Code/hermes-skills/skills/hermes-update/scripts/`，跟 SKILL 一起 git 管理（仓库 `qiyuey/hermes-skills`）。`~/.hermes/scripts/` 下的同名文件是 symlink 或薄 wrapper（见下方"脚本布局"），改逻辑请改 repo 里的源文件。
 
 排查时看：
 - `~/.hermes/state/auto-update/latest.json` 中 `status` 和 `patch_report`（patch 引擎完整 stdout）。
@@ -241,6 +241,23 @@ uv pip install -e . \
 - `hermes cron list --all` 的 `last_delivery_error`（如果 reporter 投递失败）。
 
 本机实现细节见 `references/cron-auto-update-delivery.md`。
+
+## 脚本布局
+
+所有自动更新脚本源文件统一放在 `~/Code/hermes-skills/skills/hermes-update/scripts/`，与本 skill 一起 git 管理。`~/.hermes/scripts/` 下的对应入口都指向这里：
+
+| 入口路径（被外部调用方写死的） | 类型 | 指向 |
+|---|---|---|
+| `~/.hermes/scripts/hermes-local-patches.py` | symlink | `…/hermes-update/scripts/hermes-local-patches.py` |
+| `~/.hermes/scripts/hermes-auto-update-external.sh` | symlink | `…/hermes-update/scripts/hermes-auto-update-external.sh` |
+| `~/.hermes/scripts/hermes-auto-update-restart-gateway.sh` | symlink | `…/hermes-update/scripts/hermes-auto-update-restart-gateway.sh` |
+| `~/.hermes/scripts/hermes-auto-update-report.py` | **real wrapper** | `runpy.run_path(…/hermes-update/scripts/hermes-auto-update-report.py)` |
+
+为什么 reporter 用 wrapper 而不是 symlink：`hermes-agent/cron/scheduler.py::_run_job_script` 调用 `path.resolve()` 后做 `relative_to(scripts_dir_resolved)` 检查，故意拒绝 symlink 逃逸出 `~/.hermes/scripts/` 的脚本。Cron job `c6b8487f8eb5`（`hermes-auto-update-report`）的 `script` 字段必须是真正落在 `scripts_dir` 内的文件，所以这里留一个 4 行的 wrapper，让真实逻辑仍然在 repo 里。
+
+修改任意脚本都在 repo 里改，然后 `cd ~/Code/hermes-skills && git add … && git commit && git push` 即可，`~/.hermes/scripts/` 不需要动。新增脚本时：
+- 如果不通过 cron `script:` 字段调用 → 直接在 `~/.hermes/scripts/` 里 `ln -s /home/yuchuan/Code/hermes-skills/skills/hermes-update/scripts/<new>` 即可。
+- 如果会被 cron `script:` 调用 → 在 `~/.hermes/scripts/` 写一个调用 `runpy.run_path` 的 wrapper，源文件仍放 repo。
 
 ## Patch 引擎参考
 
