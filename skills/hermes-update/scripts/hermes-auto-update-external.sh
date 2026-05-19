@@ -66,10 +66,13 @@ if ! command -v flock >/dev/null 2>&1; then
     local lockdir="${LOCK:?LOCK must be set when emulating flock}.d"
     if mkdir "$lockdir" 2>/dev/null; then
       printf '%s\n' "$$" > "$lockdir/pid"
-      # Ensure the lock is released on any normal or signal exit.  We do not
-      # append to existing traps because this script sets no other EXIT trap;
-      # if that changes, switch to a trap-append helper.
-      trap "rmdir '$lockdir' 2>/dev/null || true" EXIT INT TERM HUP
+      # Ensure the lock is released on any normal or signal exit.  `rm -rf`
+      # is required because the dir holds the pid file (rmdir only removes
+      # empty directories); the path is fully expanded into the trap body
+      # at definition time so cleanup still works after `cd` calls later.
+      # This script sets no other EXIT trap, so an unconditional set is fine
+      # here; if that changes, switch to a trap-append helper.
+      trap "rm -rf '$lockdir' 2>/dev/null || true" EXIT INT TERM HUP
       return 0
     fi
     if [ "$nonblock" -eq 1 ]; then

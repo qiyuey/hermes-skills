@@ -349,7 +349,7 @@ gh repo clone qiyuey/hermes-skills "$HOME/Code/hermes-skills"
 | **hermes update 依赖安装失败：setuptools / croniter / python-dateutil 被 exclude-newer 过滤** | `pyproject.toml` 中 `exclude-newer = "7 days"` + aliyun 镜像时间戳陈旧 | 见上方"依赖安装失败时的修复"，详见 `references/uv-exclude-newer-workaround.md` |
 | `hermes-local-patches.py` 报 `PATCH_MANIFEST_ERROR pyyaml not installed` | 系统 `/usr/bin/env python3` 解析到的解释器没装 pyyaml（macOS 上 brew Python 常态） | `pip3 install --user --break-system-packages pyyaml`（macOS）或对应发行版的 `python3-yaml` 包（Linux） |
 | macOS 上 `launchctl bootstrap` 报 `Service is disabled` | 之前 `launchctl disable` 过，或 SIP / TCC 拒绝 | 先 `launchctl enable gui/$(id -u)/com.hermes.auto-update`，再 `launchctl bootstrap …` |
-| macOS 上 stale lock：`~/.hermes/state/auto-update/update.lock.d` 没被清理 | 上一次 external.sh 被 SIGKILL 或断电杀掉，mkdir 锁没机会 trap 释放 | `rmdir ~/.hermes/state/auto-update/update.lock.d`；下一次 timer 触发会自动恢复 |
+| macOS 上 stale lock：`~/.hermes/state/auto-update/update.lock.d` 没被清理 | 上一次 external.sh 被 SIGKILL 或断电杀掉，mkdir 锁没机会 trap 释放 | `rm -rf ~/.hermes/state/auto-update/update.lock.d`（`rmdir` 删不掉，里面有 `pid` 文件）；下一次 timer 触发会自动恢复 |
 
 ## 完成前验证
 
