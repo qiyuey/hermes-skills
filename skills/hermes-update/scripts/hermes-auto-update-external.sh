@@ -23,15 +23,43 @@
 
 set -u
 
-export PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/yuchuan/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-export HOME="/home/yuchuan"
+# Required so all downstream `~/...` expansions and `hermes` invocations work
+# whether we were invoked from systemd --user (which does set HOME), an
+# interactive shell, or a manual `bash hermes-auto-update-external.sh`.
+: "${HOME:?HOME must be set to run hermes-auto-update-external.sh}"
 
-HERMES_BIN="/home/yuchuan/.local/bin/hermes"
-REPO="$HOME/.hermes/hermes-agent"
-PATCH_ENGINE="$HOME/.hermes/scripts/hermes-local-patches.py"
-RESTART_HELPER="$HOME/.hermes/scripts/hermes-auto-update-restart-gateway.sh"
-LOG_DIR="$HOME/.hermes/logs/auto-update"
-STATUS_DIR="$HOME/.hermes/state/auto-update"
+# Prepend the locations Hermes is typically installed in, but keep whatever
+# PATH the caller already had so user-specific tooling (asdf, pyenv, nix,
+# brew on macOS, ...) still works.  Linuxbrew is included because that's
+# where Hermes' uv + Python often live on Linux installs.
+_extra_path="$HOME/.local/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/opt/homebrew/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+if [ -n "${PATH:-}" ]; then
+  export PATH="$_extra_path:$PATH"
+else
+  export PATH="$_extra_path"
+fi
+unset _extra_path
+
+HERMES_BIN="${HERMES_BIN:-$(command -v hermes 2>/dev/null || true)}"
+if [ -z "$HERMES_BIN" ] || [ ! -x "$HERMES_BIN" ]; then
+  for _candidate in "$HOME/.local/bin/hermes" "/usr/local/bin/hermes" "/opt/homebrew/bin/hermes"; do
+    if [ -x "$_candidate" ]; then
+      HERMES_BIN="$_candidate"
+      break
+    fi
+  done
+fi
+if [ -z "$HERMES_BIN" ] || [ ! -x "$HERMES_BIN" ]; then
+  echo "hermes-auto-update: cannot locate hermes binary on PATH" >&2
+  exit 1
+fi
+
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+REPO="$HERMES_HOME/hermes-agent"
+PATCH_ENGINE="$HERMES_HOME/scripts/hermes-local-patches.py"
+RESTART_HELPER="$HERMES_HOME/scripts/hermes-auto-update-restart-gateway.sh"
+LOG_DIR="$HERMES_HOME/logs/auto-update"
+STATUS_DIR="$HERMES_HOME/state/auto-update"
 LOCK="$STATUS_DIR/update.lock"
 mkdir -p "$LOG_DIR" "$STATUS_DIR"
 

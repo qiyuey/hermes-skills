@@ -256,8 +256,30 @@ uv pip install -e . \
 为什么 reporter 用 wrapper 而不是 symlink：`hermes-agent/cron/scheduler.py::_run_job_script` 调用 `path.resolve()` 后做 `relative_to(scripts_dir_resolved)` 检查，故意拒绝 symlink 逃逸出 `~/.hermes/scripts/` 的脚本。Cron job `c6b8487f8eb5`（`hermes-auto-update-report`）的 `script` 字段必须是真正落在 `scripts_dir` 内的文件，所以这里留一个 4 行的 wrapper，让真实逻辑仍然在 repo 里。
 
 修改任意脚本都在 repo 里改，然后 `cd ~/Code/hermes-skills && git add … && git commit && git push` 即可，`~/.hermes/scripts/` 不需要动。新增脚本时：
-- 如果不通过 cron `script:` 字段调用 → 直接在 `~/.hermes/scripts/` 里 `ln -s /home/yuchuan/Code/hermes-skills/skills/hermes-update/scripts/<new>` 即可。
-- 如果会被 cron `script:` 调用 → 在 `~/.hermes/scripts/` 写一个调用 `runpy.run_path` 的 wrapper，源文件仍放 repo。
+- 如果不通过 cron `script:` 字段调用 → 直接在 `~/.hermes/scripts/` 里 `ln -s "$HOME/Code/hermes-skills/skills/hermes-update/scripts/<new>" <new>` 即可（用绝对路径让 systemd/cron 也能 resolve）。
+- 如果会被 cron `script:` 调用 → 在 `~/.hermes/scripts/` 写一个调用 `runpy.run_path` 的 wrapper（用 `pathlib.Path.home()` 拼路径），源文件仍放 repo。
+
+## 全新机器安装
+
+整套自动更新包括 4 个脚本 + 1 个 wrapper + 2 个 systemd unit + 1 个 cron job + 1 份 local-patches manifest。在一台干净的 Hermes 上启用：
+
+```bash
+# 1. 拉仓库 + 让 hermes-skills-sync 把所有 skill symlink 到 ~/.hermes/skills/
+gh repo clone qiyuey/hermes-skills "$HOME/Code/hermes-skills"
+# 然后让 hermes-skills-sync skill 跑一遍场景一
+
+# 2. 安装自动更新粘合层（symlink / wrapper / systemd unit / local-patches 模板）
+"$HOME/Code/hermes-skills/skills/hermes-update/scripts/install.sh"
+
+# 3. 按 install.sh 末尾打印的提示，用 cronjob 工具注册 reporter cron job
+#    （cron job 必须通过 hermes 接口创建，install.sh 不能直接改 jobs.json）
+```
+
+`install.sh` 是**幂等**的：已存在的 symlink / wrapper / systemd unit 不会被覆盖，已存在的 local-patches manifest 不会被改写，重复跑安全。
+
+仍然需要人工确认的两件事：
+1. **upstream `HERMES_UPDATE_SKIP_GATEWAY_RESTART` 分支**。如果跑的是没合并这个能力的 hermes-agent 版本，systemd timer 触发完 update 后 gateway 会立刻被重启、cron 投递会被打断。此时需要手工往 `hermes_cli/main.py` 加这一分支（见 `references/cron-auto-update-delivery.md` 的 patch 片段），commit 后把 commit SHA 填进 `~/.hermes/local-patches/hermes-agent.yaml` 里 install.sh 写好的 `hermes-update-skip-gateway-restart` 条目。
+2. **reporter cron job 注册**。install.sh 最后会打印需要执行的 `cronjob(action="create", …)` 调用，自己执行一次即可。
 
 ## Patch 引擎参考
 

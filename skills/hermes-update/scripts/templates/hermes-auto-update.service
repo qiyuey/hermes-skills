@@ -1,0 +1,10 @@
+[Unit]
+Description=Hermes Agent external auto-update
+Documentation=https://hermes-agent.nousresearch.com/docs
+
+[Service]
+Type=oneshot
+# %h expands to the invoking user's home directory under systemd --user,
+# so this unit file is portable across machines/users with no rewriting.
+ExecStart=%h/.hermes/scripts/hermes-auto-update-external.sh
+Nice=5
