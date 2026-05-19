@@ -1,7 +1,7 @@
 ---
 name: hermes-post-update
 description: Use when the user asks to update, upgrade, check, or troubleshoot Hermes Agent itself, especially from Telegram/WeChat gateway sessions.
-version: 4.2.0
+version: 5.0.0
 author: Hermes Agent
 metadata:
   hermes:
@@ -11,11 +11,13 @@ metadata:
 
 # Hermes 更新流程
 
-> NOTE: This skill's canonical file is at `~/.hermes/skills/hermes-update/SKILL.md` due to a directory/frontmatter name mismatch. `skill_manage` cannot resolve it by name. To edit, use `terminal` to edit the file directly, or rename the directory to `hermes-post-update`. This copy is a mirror — see `references/` for session-specific pitfalls.
+> NOTE: This skill's canonical file is at `~/.hermes/skills/hermes-update/SKILL.md` due to a directory/frontmatter name mismatch. `skill_manage` cannot resolve it by name. To edit, use `terminal` to edit the file directly, or rename the directory to `hermes-post-update`. The sibling copy at `~/.hermes/skills/hermes-post-update/SKILL.md` mirrors this file — keep both in sync until the rename happens.
 
 ## 核心原则
 
 更新 Hermes 时要避免让当前 gateway 会话失联。先确认状态，再用**可恢复、可查看日志**的后台流程执行，最后验证版本与进程。
+
+**Patch 处理已经引擎化**：`~/.hermes/scripts/hermes-local-patches.py` 是唯一负责 patch 恢复/验证的入口，所有手动和 cron 流程都应该调用它，**不要再嵌入内联 Python**。
 
 ## 触发条件
 
@@ -34,14 +36,15 @@ metadata:
 ```bash
 hermes --version
 cd ~/.hermes/hermes-agent && git fetch origin main && git rev-parse --short HEAD && git rev-parse --short origin/main && git status --short
+~/.hermes/scripts/hermes-local-patches.py status
 ```
 
 判断：
-- `HEAD == origin/main` 且 `hermes --version` 显示 `Up to date` → 汇报"已是最新"，不要再执行更新。
-- 有更新或版本命令提示 behind → 进入后台更新。
-- 有本地变更 → **先 `git diff` 检查内容，不要直接交给 autostash**。autostash 会让未提交的工作区改动在更新后被 stash pop 回来，但如果改动其实是一个**正在使用的本地能力**（例如本机给 `/model picker` 加的过滤、某个 patch 的扩展），它就会以 unstaged 状态继续游荡，下一次更新或某次 `git restore` 时丢失。判断流程：
-  1. `git diff --stat` + `git diff` 查看每个修改文件实际变更。
-  2. 如果是正在用的功能/修复 → 立刻 `git commit` 成正式 commit，并在 `~/.hermes/local-patches/hermes-agent.yaml` 增加对应条目（`marker_file` / `marker_regex` / `commit_candidates: [<新 commit short hash>]` / `commit_message`），下一次更新会自动恢复。
+- `git merge-base --is-ancestor origin/main HEAD` 为真且 `hermes --version` 显示 `Up to date` → 已是最新（HEAD 可能因本地 patch commit 比 origin/main 高几格，这是正常的）。
+- 有更新或 `Update available: N commits behind` → 进入后台更新。
+- 有本地变更（`git status --short` 非空）→ **先 `git diff` 检查内容，不要直接交给 autostash**：
+  1. **如果改动对应一个已注册的 patch（marker 在 worktree 但不在 HEAD）**：执行 `~/.hermes/scripts/hermes-local-patches.py recover`，引擎会自动 commit 这些改动作为 patch。
+  2. 如果是正在用的功能/修复 → 立刻 `git commit` 成正式 commit，并在 `~/.hermes/local-patches/hermes-agent.yaml` 增加对应条目（`marker_file` / `marker_regex` / `commit_candidates: [<新 commit short hash>]` / `commit_message` / `touched_files`），下一次更新会自动恢复。
   3. 如果只是临时调试/打印 → 才让 autostash 处理，更新后复查 `git status`。
   4. 未跟踪目录（`tinker-atropos/` 这类）一般是工作目录残留，autostash 不会动它，保留即可。
 - 有 `git log origin/main..HEAD` 显示的本地 commit → 核对每条 commit 都已在 patch manifest 里登记，未登记的立即补上，再继续更新。
@@ -90,12 +93,16 @@ log=/tmp/hermes-update-$(date +%Y%m%d-%H%M%S).log
 {
   echo '=== before ==='
   hermes --version || true
+  echo '=== pre-update patch recovery ==='
+  ~/.hermes/scripts/hermes-local-patches.py recover || true
   echo '=== update ==='
-  hermes update
+  HERMES_UPDATE_SKIP_GATEWAY_RESTART=1 hermes update --yes
   echo '=== after ==='
   hermes --version || true
   echo '=== git ==='
   cd ~/.hermes/hermes-agent && git rev-parse --short HEAD && git rev-parse --short origin/main && git status --short
+  echo '=== patches ==='
+  ~/.hermes/scripts/hermes-local-patches.py apply
 } 2>&1 | tee "$log"
 ```
 
@@ -151,99 +158,59 @@ uv pip install -e . \
 1. 记录更新前状态：
    hermes --version
    cd ~/.hermes/hermes-agent && git fetch origin main && git rev-parse --short HEAD && git rev-parse --short origin/main && git status --short
+   ~/.hermes/scripts/hermes-local-patches.py status
 
-2. 如果 HEAD 与 origin/main 相同，且 hermes --version 显示 Up to date：
+2. 如果 origin/main 已是 HEAD 的祖先，且 hermes --version 显示 Up to date：
    直接用中文简洁汇报"已是最新"，附版本和 commit，然后结束。
+   （HEAD 因本地 patch commit 比 origin/main 高几格属正常，不算 behind。）
 
-3. 如果需要更新：
-   运行 `hermes update`，完整捕获输出。不要用无限交互；如出现提示，使用默认确认。
+3. 如果有未提交的本地改动：
+   先跑 `~/.hermes/scripts/hermes-local-patches.py recover`，让引擎把对应 patch 改动 commit 掉。
+   剩余未识别的改动在更新前先 `git diff` 检查；非临时调试就 `git commit`，再决定是否登记 manifest。
 
-4. 更新后验证：
+4. 如果需要更新：
+   运行 `HERMES_UPDATE_SKIP_GATEWAY_RESTART=1 hermes update --yes`，完整捕获输出。
+
+5. 更新后验证：
    hermes --version
    cd ~/.hermes/hermes-agent && git rev-parse --short HEAD && git rev-parse --short origin/main && git status --short
 
-5. 如果依赖安装失败（setuptools/croniter 被 exclude-newer 过滤）：
-   参考 skill hermes-post-update 中"依赖安装失败时的修复"步骤手动修复，然后重新 hermes doctor --fix 验证。
+6. 如果依赖安装失败（setuptools/croniter 被 exclude-newer 过滤）：
+   参考 skill 中"依赖安装失败时的修复"步骤手动修复，然后重新 hermes doctor --fix 验证。
 
-6. 恢复本地专属 patches（更新后必须检查，不能只检查单个硬编码 patch）：
-
-   - 首选读取 `~/.hermes/local-patches/hermes-agent.yaml` 作为本机 patch 清单；这个文件在源码仓库外，能跨 `hermes update` 保留。
-   - 每个 patch 条目至少包含：`name`、`marker_file`、`marker_regex`、`commit_candidates`、`commit_message`。
-   - 对每个条目执行：
-     1. `grep -Eq "$marker_regex" "$marker_file"` 成功 → `PATCH_OK <name>`，跳过。
-     2. marker 缺失 → 按 `commit_candidates` 顺序找第一个存在的 commit/branch/ref。
-     3. 执行 `git cherry-pick <ref> --no-commit`，然后 `git commit -m "$commit_message"`。
-     4. 如 cherry-pick 冲突：停止后续 patch，汇报 `PATCH_CONFLICT <name>`、冲突文件、保留工作区等待人工处理；不要自动 abort。
-   - 如果 manifest 不存在，使用兼容 fallback：只检查 Bedrock ARN patch（marker: `GetInferenceProfile` in `agent/bedrock_adapter.py`），但汇报"未发现通用 patch manifest，建议补充"。
-
-   参考执行脚本：
+7. 恢复本地专属 patches：
 
    ```bash
-   cd ~/.hermes/hermes-agent
-   manifest="$HOME/.hermes/local-patches/hermes-agent.yaml"
-   if [ -f "$manifest" ]; then
-     python - <<'PY'
-import subprocess, sys, yaml, pathlib, re, os
-repo = pathlib.Path.home()/'.hermes/hermes-agent'
-manifest = pathlib.Path.home()/'.hermes/local-patches/hermes-agent.yaml'
-data = yaml.safe_load(manifest.read_text()) or {}
-patches = data.get('patches', [])
-for p in patches:
-    name = p['name']
-    marker_file = repo / p['marker_file']
-    marker_regex = p['marker_regex']
-    if marker_file.exists() and re.search(marker_regex, marker_file.read_text(errors='ignore'), re.M):
-        print(f'PATCH_OK {name}')
-        continue
-    ref = None
-    for cand in p.get('commit_candidates', []):
-        r = subprocess.run(['git','cat-file','-e',f'{cand}^{{commit}}'], cwd=repo)
-        if r.returncode == 0:
-            ref = cand; break
-    if not ref:
-        print(f'PATCH_MISSING_REF {name} candidates={p.get("commit_candidates", [])}')
-        sys.exit(2)
-    r = subprocess.run(['git','cherry-pick',ref,'--no-commit'], cwd=repo)
-    if r.returncode != 0:
-        subprocess.run(['git','diff','--name-only','--diff-filter=U'], cwd=repo)
-        print(f'PATCH_CONFLICT {name}')
-        sys.exit(r.returncode)
-    msg = p.get('commit_message') or f'local: re-apply {name} after update'
-    subprocess.check_call(['git','commit','-m',msg], cwd=repo)
-    print(f'PATCH_RESTORED {name} from {ref}')
-PY
-   else
-     echo "PATCH_MANIFEST_MISSING $manifest"
-     if grep -q "GetInferenceProfile" agent/bedrock_adapter.py; then
-       echo "PATCH_OK bedrock-application-inference-profile-arns"
-     else
-       PATCH_COMMIT=$(git log pr-16805-bedrock-arn --oneline 2>/dev/null | grep "application-inference-profile ARNs" | head -1 | awk '{print $1}')
-       if [ -z "$PATCH_COMMIT" ]; then
-         for h in 7229d0608 55735c123 5f6e04569 222e272ec 07c096e57; do
-           git cat-file -e "${h}^{commit}" 2>/dev/null && PATCH_COMMIT=$h && break
-         done
-       fi
-       if [ -n "$PATCH_COMMIT" ]; then
-         git cherry-pick "$PATCH_COMMIT" --no-commit && git commit -m "feat(bedrock): re-apply application-inference-profile ARN support after update"
-       else
-         echo "PATCH_MISSING_REF bedrock-application-inference-profile-arns"
-       fi
-     fi
-   fi
+   ~/.hermes/scripts/hermes-local-patches.py apply
    ```
 
-   汇报所有 patch 状态：`PATCH_OK` / `PATCH_RESTORED` / `PATCH_CONFLICT` / `PATCH_MISSING_REF`，并说明是否使用了 manifest 或 fallback。
+   引擎会按 `~/.hermes/local-patches/hermes-agent.yaml` 顺序处理每个 patch，输出形如：
+   - `PATCH_OK <name>`           — marker 已在 HEAD，无需操作
+   - `PATCH_RECOMMITTED <name>`  — 把 worktree 中匹配 marker 的未提交改动 commit 成 patch
+   - `PATCH_RESTORED <name>`     — cherry-pick 候选 ref 成功
+   - `PATCH_CONFLICT <name>`     — cherry-pick 冲突，引擎已 abort，工作区已清理；后续 patch 继续处理
+   - `PATCH_MISSING_REF <name>`  — 候选 ref 都不可达，需要人工补 manifest
+   最后一行是 `PATCH_SUMMARY ok=N recommitted=N restored=N conflict=N missing_ref=N skipped=N`。
 
-7. 可选：如果 `gh` 可用，读取最新 release notes：
+   引擎**永不**因为单个 patch 失败而中断后续 patch。如果出现 CONFLICT/MISSING_REF：
+   - 把对应 patch 的 manifest 条目读出来给用户看（`name` / `failure_pattern` / `upstream_convergence_hint` / `touched_files`）。
+   - 如果 marker 已在 HEAD（说明上游收敛了等效修复）→ 提示用户从 manifest 里删除该条目。
+   - 否则用 `git log <touched_files>` 找上游可能合并的等效 commit；解决冲突后用 `git cherry-pick <ref>` 手动重做或修订 manifest。
+
+8. 安排延迟重启：
+   `~/.hermes/scripts/hermes-auto-update-restart-gateway.sh` 默认 sleep 180 秒后执行 `hermes gateway restart`，给 cron 足够时间完成投递。
+   一次性更新 cron 也应使用同样的 helper，而不是直接 `hermes gateway restart`。
+
+9. 可选：如果 `gh` 可用，读取最新 release notes：
    gh release list --repo NousResearch/hermes-agent --limit 1
    gh release view <tag> --repo NousResearch/hermes-agent
    只提取和日常使用相关的 3-5 条。
 
-8. 最终中文汇报：
+10. 最终中文汇报：
    - 是否成功
    - 更新前后版本/commit
    - 是否仍 behind
-   - 本地变更/autostash 是否恢复或有冲突
+   - patch 引擎的输出（PATCH_SUMMARY 一行 + 任何 CONFLICT/MISSING_REF 详情）
    - 如失败，给关键错误和下一步
 ```
 
@@ -251,41 +218,49 @@ PY
 
 如果更新会重启 `hermes-gateway`，不要让 Hermes cron job 自己在 agent 进程里执行完整 `hermes update`：gateway 重启可能中断 cron session，导致 `last_run_at` 不写回、patch 恢复/验证步骤没跑完。
 
-推荐拆成两段：
-1. **外部 systemd user timer** 在 10:00 执行独立脚本（例如 `~/.hermes/scripts/hermes-auto-update-external.sh`）：检查版本、运行 `hermes update`、按 `~/.hermes/local-patches/hermes-agent.yaml` 恢复/验证本地 patches、写 `~/.hermes/state/auto-update/latest.json` 和日志。脚本必须用 lock 防重入，并把 `origin/main` 已包含在本地 patch commit 的情况视为 up-to-date，而不是要求 `HEAD == origin/main`。
-2. **Hermes cron reporter** 在 10:15 只读取状态文件并汇报：无更新输出 `[SILENT]`；有更新/失败才发消息。这个 cron 不再执行 update，所以不会被 gateway restart 打断。
+当前实现使用 systemd user timer（**不是** Hermes 内部 cron），完全独立于 gateway：
 
-如果暂时不拆分，也可以保留一个名为 `hermes-auto-update` 的 recurring cron job，但要知道它在 gateway 重启时可能无法完成收尾。
+1. **systemd user timer** `hermes-auto-update.timer` 在 10:00 触发 `hermes-auto-update.service`，跑 `~/.hermes/scripts/hermes-auto-update-external.sh`。该脚本顺序：
+   - flock 防重入
+   - 启用 git rerere 记忆冲突解决
+   - 跑 `hermes-local-patches.py recover`（commit autostash 残留）
+   - `HERMES_UPDATE_SKIP_GATEWAY_RESTART=1 hermes update --yes`
+   - 跑 `hermes-local-patches.py apply`（cherry-pick 缺失 patch；冲突不会中断）
+   - 写状态到 `~/.hermes/state/auto-update/latest.json` + 日志到 `~/.hermes/logs/auto-update/<run_id>.log`
+   - 启动 `hermes-auto-update-restart-gateway.sh` 异步等 180 秒后再重启 gateway，避开投递竞态。
+2. **Hermes cron reporter** `hermes-auto-update-report.py` 在 10:15 只读取 `latest.json` 并汇报：无更新输出 `[SILENT]`；有更新/失败/patch_failed 才发消息。这个 cron 不再执行 update，所以不会被 gateway restart 打断。
 
-建议 reporter 设置：
-- schedule: `15 10 * * *`（北京时间 10:15）
-- script: `hermes-auto-update-report.py`
-- prompt：若脚本输出 `[SILENT]` 则最终严格输出 `[SILENT]`；JSON status=updated/failed 时简洁汇报版本、head/origin、git_status、log 路径。
+修改了什么不要忘了：
+- 把 `HERMES_UPDATE_SKIP_GATEWAY_RESTART` 本地 patch 记录进 `~/.hermes/local-patches/hermes-agent.yaml`，否则 upstream update 可能覆盖该能力。
+- `~/.hermes/scripts/` 三个脚本（`hermes-local-patches.py`、`hermes-auto-update-external.sh`、`hermes-auto-update-restart-gateway.sh`）属于 ~/.hermes 而**不是** repo，跨 update 自动保留。
 
-### cron 自动更新投递坑：不要在投递前重启 gateway
-
-如果 cron prompt 里直接运行 `hermes update`，更新成功后它会自动重启 gateway。由于 cron scheduler 本身跑在 gateway 进程里，重启发生在 cron 最终回复投递之前时，Telegram/Weixin 发送经常失败：
-
-```text
-cannot schedule new futures after interpreter shutdown
-```
-
-本机修复方式：
-1. `hermes update` 支持环境变量 `HERMES_UPDATE_SKIP_GATEWAY_RESTART=1`（本地 patch）。cron 自动更新必须这样调用，而不是裸跑 `hermes update`：
-   ```bash
-   HERMES_UPDATE_SKIP_GATEWAY_RESTART=1 hermes update --yes 2>&1
-   ```
-2. cron 最终报告生成和投递前不要重启 gateway。
-3. 更新验证、本地 patch 恢复都完成后，只安排延迟重启，不等待完成：
-   ```bash
-   nohup "$HOME/.hermes/scripts/hermes-auto-update-restart-gateway.sh" >/tmp/hermes-auto-update-delayed-restart.nohup 2>&1 &
-   ```
-4. `~/.hermes/scripts/hermes-auto-update-restart-gateway.sh` 默认 sleep 180 秒后执行 `hermes gateway restart`，给 cron 足够时间完成投递。
-5. 把 skip-restart 本地 patch 记录进 `~/.hermes/local-patches/hermes-agent.yaml`，marker 用 `HERMES_UPDATE_SKIP_GATEWAY_RESTART` in `hermes_cli/main.py`；否则下一次 upstream update 可能覆盖该能力，cron 又退回投递竞态。
-
-排查时看：`hermes cron list --all` 的 `last_delivery_error`，以及 `~/.hermes/cron/output/<job_id>/` 中是否已经生成报告但没投递。若用户感觉很久没收到更新通知，先确认 `deliver=origin` 的 `origin.platform/chat_id`，再检查输出文件是否非 `[SILENT]`：报告生成但 `last_delivery_error` 存在时，问题在投递而不是更新逻辑。
+排查时看：
+- `~/.hermes/state/auto-update/latest.json` 中 `status` 和 `patch_report`（patch 引擎完整 stdout）。
+- `~/.hermes/logs/auto-update/<run_id>.log` 完整 update 日志。
+- `~/.hermes/logs/auto-update/<run_id>.patches.txt` 仅 patch 阶段的 stdout。
+- `hermes cron list --all` 的 `last_delivery_error`（如果 reporter 投递失败）。
 
 本机实现细节见 `references/cron-auto-update-delivery.md`。
+
+## Patch 引擎参考
+
+`~/.hermes/scripts/hermes-local-patches.py` 子命令：
+- `status`：只检查每个 patch 的 marker 状态，不写盘。退出码 0=全部 ok，1=有未恢复 patch。
+- `recover`：只把 marker 在 worktree 但不在 HEAD 的 patch commit 掉（用于 update 前清理 autostash 残留）。
+- `apply`：完整流程 = recover + verify + cherry-pick missing。`--json` 选项额外输出结构化 JSON 报告。
+
+`~/.hermes/local-patches/hermes-agent.yaml` 必备字段：
+- `name`：patch 唯一标识
+- `marker_file` / `marker_regex`：检测 patch 是否已应用
+- `commit_candidates`：候选 ref 列表，从前往后试，第一个能 cherry-pick 的就用
+- `commit_message`：cherry-pick / re-commit 用的 message
+- `touched_files`：recover 时只允许这些文件被 commit（防止把无关改动卷进来）
+
+可选字段（仅文档用）：
+- `failure_pattern`：未 patch 时的可观测症状
+- `upstream_convergence_hint`：上游若合入等效修复会改动哪里
+
+`~/.hermes/local-patches/.applied-history.json` 由引擎自动维护，记录每个 patch 最近成功应用的 SHA，下次会优先尝试这些（解决"reflog GC 后旧 SHA 不可达"问题）。
 
 ## 常见坑
 
@@ -294,9 +269,11 @@ cannot schedule new futures after interpreter shutdown
 | `skill_view("hermes-post-update")` 失败 | skill 目录名（hermes-update）和 frontmatter name（hermes-post-update）不一致 | skill_manage 无法按名字定位；用 terminal 直接编辑 `~/.hermes/skills/hermes-update/SKILL.md`，或将目录改名为 hermes-post-update |
 | cron 一次性任务没回报 | 还在 scheduled、gateway 重启、或任务被旧 scheduler 状态覆盖 | 先查 cron list，再用版本/git/log 复核实际状态 |
 | `hermes update` 后 process not_found | gateway 重启导致进程跟踪句柄丢失 | 读日志 + `hermes --version` 复核 |
-| update 提示 local changes restored | autostash 正常恢复本地改动 | 跑 `git status --short`，只在冲突时处理 |
-| 工作区里有未提交的"功能性"改动（不是临时调试） | 上一次会话写完忘了 commit；直接 update 会让它以 unstaged 状态留下来，patch manifest 也没登记，下次更新或 restore 时丢失 | **先 `git diff` 判断性质**：是功能/修复就 commit + 登记 manifest（见"标准流程 §1"），是临时调试才交给 autostash |
+| update 提示 local changes restored | autostash 正常恢复本地改动 | 跑 `git status --short`，再跑 `hermes-local-patches.py apply` 让 unstaged 自动归位 |
+| 工作区里有未提交的"功能性"改动（不是临时调试） | 上一次会话写完忘了 commit；直接 update 会让它以 unstaged 状态留下来 | `hermes-local-patches.py recover` 自动 commit；如果不在 manifest 里就先 `git diff` 判断，再补 manifest |
 | 本地 `git log origin/main..HEAD` 有 commit 但 patch manifest 没登记 | 之前手工 commit 但没维护 manifest；未来某次 cherry-pick 时找不到 ref | 更新前补全 manifest（每个本地 commit 一个条目，`commit_candidates` 填 short hash） |
+| patch 引擎输出 `PATCH_CONFLICT` | cherry-pick 该 patch 时和上游 main 冲突；常见原因：上游重构了 patch 触及的函数 | 引擎已 abort，工作区干净。读 `~/.hermes/local-patches/hermes-agent.yaml` 该条目的 `upstream_convergence_hint`，定位上游重构后的新位置，手工 cherry-pick + 修改路径，commit 后下次 marker 就能匹配 |
+| patch 引擎输出 `PATCH_MISSING_REF` | manifest 里所有 `commit_candidates` 都不存在（reflog GC + 上次 update 重写历史） | 用 `git log` / `gh pr view` 找最近一次成功 apply 的 SHA，补到 `commit_candidates` 头部 |
 | 用户问"`.hermes` 是 git 仓库吗？"或要求清理更新残留 | `~/.hermes` 本身通常不是 git 仓库；源码仓库在 `~/.hermes/hermes-agent`，skills 可能 symlink 到 `~/Code/hermes-skills` | 先分别验证 `git rev-parse --show-toplevel`，只在确认的仓库根目录执行 `git restore`/删除 untracked；不要把 `~/.hermes` 根目录当仓库 |
 | `gh release` 不可用 | gh 未安装或未认证 | 跳过 release notes，不影响更新结论 |
 | **hermes update 依赖安装失败：setuptools / croniter / python-dateutil 被 exclude-newer 过滤** | `pyproject.toml` 中 `exclude-newer = "7 days"` + aliyun 镜像时间戳陈旧 | 见上方"依赖安装失败时的修复"，详见 `references/uv-exclude-newer-workaround.md` |
@@ -308,7 +285,8 @@ cannot schedule new futures after interpreter shutdown
 ```bash
 hermes --version
 cd ~/.hermes/hermes-agent && git rev-parse --short HEAD && git rev-parse --short origin/main && git status --short
+~/.hermes/scripts/hermes-local-patches.py status
 ps -ef | grep -i '[h]ermes.*gateway' | head
 ```
 
-汇报时不要只说"已启动"；要说明"已启动 / 已完成 / 已是最新 / 失败"的真实状态。
+汇报时不要只说"已启动"；要说明"已启动 / 已完成 / 已是最新 / 失败"的真实状态，并引用 `PATCH_SUMMARY` 那一行。
