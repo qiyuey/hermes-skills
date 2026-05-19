@@ -261,7 +261,7 @@ uv pip install -e . \
 
 ## 全新机器安装
 
-整套自动更新包括 4 个脚本 + 1 个 wrapper + 2 个 systemd unit + 1 个 cron job + 1 份 local-patches manifest。在一台干净的 Hermes 上启用：
+整套自动更新包括 4 个脚本 + 1 个 wrapper + 2 个 systemd unit + 1 个 cron job + 1 份 local-patches manifest + 1 个 hermes-agent 上的 patch。在一台干净的 Hermes 上启用：
 
 ```bash
 # 1. 拉仓库 + 让 hermes-skills-sync 把所有 skill symlink 到 ~/.hermes/skills/
@@ -269,17 +269,30 @@ gh repo clone qiyuey/hermes-skills "$HOME/Code/hermes-skills"
 # 然后让 hermes-skills-sync skill 跑一遍场景一
 
 # 2. 安装自动更新粘合层（symlink / wrapper / systemd unit / local-patches 模板）
-"$HOME/Code/hermes-skills/skills/hermes-update/scripts/install.sh"
+#    --apply-patches 让 install.sh 直接 git am 仓库里 patches/ 下的 patch，
+#    并把生成的 commit SHA 自动回填到 manifest
+"$HOME/Code/hermes-skills/skills/hermes-update/scripts/install.sh" --apply-patches
 
 # 3. 按 install.sh 末尾打印的提示，用 cronjob 工具注册 reporter cron job
 #    （cron job 必须通过 hermes 接口创建，install.sh 不能直接改 jobs.json）
 ```
 
-`install.sh` 是**幂等**的：已存在的 symlink / wrapper / systemd unit 不会被覆盖，已存在的 local-patches manifest 不会被改写，重复跑安全。
+`install.sh` 是**幂等**的：
+- 已存在的 symlink / wrapper / systemd unit 不会被覆盖
+- 已存在的 local-patches manifest 不会被改写
+- hermes-agent 里 marker 已经在 HEAD 时，patch 不会重复 `git am`
 
-仍然需要人工确认的两件事：
-1. **upstream `HERMES_UPDATE_SKIP_GATEWAY_RESTART` 分支**。如果跑的是没合并这个能力的 hermes-agent 版本，systemd timer 触发完 update 后 gateway 会立刻被重启、cron 投递会被打断。此时需要手工往 `hermes_cli/main.py` 加这一分支（见 `references/cron-auto-update-delivery.md` 的 patch 片段），commit 后把 commit SHA 填进 `~/.hermes/local-patches/hermes-agent.yaml` 里 install.sh 写好的 `hermes-update-skip-gateway-restart` 条目。
-2. **reporter cron job 注册**。install.sh 最后会打印需要执行的 `cronjob(action="create", …)` 调用，自己执行一次即可。
+不带 `--apply-patches` 也安全，install.sh 会检测 marker 缺失并在 NEXT STEPS 里给出你要手工跑的 `git am` 命令；带上 `--apply-patches` 则一步到位（同时还会把 manifest 的 `REPLACE_WITH_YOUR_COMMIT_SHORT_SHA` 占位符替换成新生成的 commit short SHA）。
+
+仍然需要人工的一件事：**reporter cron job 注册**。install.sh 最后会打印需要执行的 `cronjob(action="create", …)` 调用，自己执行一次即可。
+
+### Patch 文件
+
+仓库里 `skills/hermes-update/patches/` 目录是所有上游 hermes-agent patch 的 canonical 来源，用 `git format-patch` 格式打包，可以直接 `git am` 重放出一致 commit：
+
+- `0001-fix-update-allow-external-schedulers-to-skip-gateway-restart.patch` — `HERMES_UPDATE_SKIP_GATEWAY_RESTART` 环境变量闸门，让外部 scheduler 跳过 gateway 自动重启。`install.sh --apply-patches` 默认应用。
+
+未来新增 patch 时遵循同样的约定（`format-patch` 输出 + manifest `commit_candidates` 占位 + install.sh 自动 am），让一行 `install.sh --apply-patches` 永远是新机器的入口。
 
 ## Patch 引擎参考
 

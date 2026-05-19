@@ -28,17 +28,21 @@ set -euo pipefail
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPTS_SRC="$SKILL_DIR/scripts"
 TEMPLATES="$SCRIPTS_SRC/templates"
+PATCHES_DIR="$SKILL_DIR/patches"
 
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 SCRIPTS_DEST="$HERMES_HOME/scripts"
 LOCAL_PATCHES_DIR="$HERMES_HOME/local-patches"
 LOCAL_PATCHES_FILE="$LOCAL_PATCHES_DIR/hermes-agent.yaml"
+HERMES_AGENT_REPO="$HERMES_HOME/hermes-agent"
 SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
 
 FORCE=0
+APPLY_PATCHES=0
 for arg in "$@"; do
   case "$arg" in
     --force) FORCE=1 ;;
+    --apply-patches) APPLY_PATCHES=1 ;;
     -h|--help)
       sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//;/^set -euo/d'
       exit 0
@@ -118,6 +122,78 @@ seed_local_patches() {
   install -m 0644 "$TEMPLATES/local-patches.minimal.yaml" "$LOCAL_PATCHES_FILE"
 }
 
+# Status values printed by check_or_apply_skip_restart_patch (used by
+# print_cron_registration_hint to tailor the post-install message):
+#   ok-applied    the marker was already present in HEAD (existing install)
+#   am-applied    install applied the .patch and produced a new commit
+#   am-needed     patch missing and --apply-patches NOT passed; user must run
+#   no-repo       ~/.hermes/hermes-agent missing; skip silently
+#   am-failed     git am attempted but failed (caller already saw the error)
+SKIP_RESTART_PATCH_STATUS=""
+
+check_or_apply_skip_restart_patch() {
+  local patch_file="$PATCHES_DIR/0001-fix-update-allow-external-schedulers-to-skip-gateway-restart.patch"
+  if [ ! -d "$HERMES_AGENT_REPO/.git" ]; then
+    SKIP_RESTART_PATCH_STATUS="no-repo"
+    warn "hermes-agent repo not found at $HERMES_AGENT_REPO; skip-restart patch step deferred"
+    return
+  fi
+  if [ ! -f "$patch_file" ]; then
+    SKIP_RESTART_PATCH_STATUS="no-repo"
+    warn "patch file missing: $patch_file"
+    return
+  fi
+  # Marker check uses git show so we look at HEAD's tree, not the worktree —
+  # matches what `hermes-local-patches.py status` does.  Use process
+  # substitution to avoid `set -o pipefail` treating grep -q's early close
+  # (SIGPIPE on git show) as a failure when the marker is found in line 1.
+  if grep -q HERMES_UPDATE_SKIP_GATEWAY_RESTART \
+      <(git -C "$HERMES_AGENT_REPO" show HEAD:hermes_cli/main.py 2>/dev/null); then
+    SKIP_RESTART_PATCH_STATUS="ok-applied"
+    log "skip-restart patch already in HEAD of $HERMES_AGENT_REPO"
+    return
+  fi
+  if [ "$APPLY_PATCHES" -ne 1 ]; then
+    SKIP_RESTART_PATCH_STATUS="am-needed"
+    warn "skip-restart patch NOT in HEAD; pass --apply-patches to git-am it now"
+    return
+  fi
+  # Refuse to clobber an in-progress am/cherry-pick/rebase.
+  if [ -d "$HERMES_AGENT_REPO/.git/rebase-apply" ] \
+      || [ -d "$HERMES_AGENT_REPO/.git/rebase-merge" ] \
+      || [ -f "$HERMES_AGENT_REPO/.git/CHERRY_PICK_HEAD" ]; then
+    SKIP_RESTART_PATCH_STATUS="am-failed"
+    warn "skip-restart patch: $HERMES_AGENT_REPO has an in-progress operation; resolve it first"
+    return
+  fi
+  log "applying skip-restart patch via git am in $HERMES_AGENT_REPO"
+  if git -C "$HERMES_AGENT_REPO" am --keep-cr "$patch_file"; then
+    local new_sha
+    new_sha="$(git -C "$HERMES_AGENT_REPO" rev-parse --short HEAD)"
+    log "skip-restart patch applied as commit $new_sha"
+    SKIP_RESTART_PATCH_STATUS="am-applied"
+    # If the freshly-seeded manifest still has the placeholder SHA, swap in
+    # the real one we just produced.  We don't touch an existing user-edited
+    # manifest beyond this string replacement; if the placeholder isn't
+    # present we leave the file alone.
+    if [ -f "$LOCAL_PATCHES_FILE" ] \
+        && grep -q REPLACE_WITH_YOUR_COMMIT_SHORT_SHA "$LOCAL_PATCHES_FILE"; then
+      log "rewriting manifest placeholder SHA -> $new_sha"
+      python3 - "$LOCAL_PATCHES_FILE" "$new_sha" <<'PY'
+import sys, pathlib
+path = pathlib.Path(sys.argv[1])
+sha = sys.argv[2]
+text = path.read_text()
+text = text.replace("REPLACE_WITH_YOUR_COMMIT_SHORT_SHA", sha)
+path.write_text(text)
+PY
+    fi
+  else
+    SKIP_RESTART_PATCH_STATUS="am-failed"
+    warn "git am failed; run \`git -C $HERMES_AGENT_REPO am --abort\` and apply manually"
+  fi
+}
+
 enable_systemd_timer() {
   if ! command -v systemctl >/dev/null 2>&1; then
     warn "systemctl not available; skipping timer enablement"
@@ -172,16 +248,68 @@ NEXT STEPS (must be done by hand inside Hermes)
    Adjust the schedule if your timezone or 17:00 trigger needs to shift;
    keep it ~15min after the systemd timer's OnCalendar value.
 
-2. Apply the `HERMES_UPDATE_SKIP_GATEWAY_RESTART` patch to hermes-agent
-   (see references/cron-auto-update-delivery.md), commit it, then
-   replace `REPLACE_WITH_YOUR_COMMIT_SHORT_SHA` in
-   ~/.hermes/local-patches/hermes-agent.yaml with the new commit's
-   short SHA.  Run:
+EOF
+
+  case "$SKIP_RESTART_PATCH_STATUS" in
+    ok-applied)
+      cat <<EOF
+2. ✓ HERMES_UPDATE_SKIP_GATEWAY_RESTART patch is already in HEAD of
+   $HERMES_AGENT_REPO (no action needed).
+
+EOF
+      ;;
+    am-applied)
+      cat <<EOF
+2. ✓ HERMES_UPDATE_SKIP_GATEWAY_RESTART patch was just applied via git am
+   and the manifest placeholder SHA was rewritten.  Verify:
 
      ~/.hermes/scripts/hermes-local-patches.py status
 
-   Expect: `PATCH_COMMITTED hermes-update-skip-gateway-restart`.
+   Expect: \`PATCH_COMMITTED hermes-update-skip-gateway-restart\`.
 
+EOF
+      ;;
+    am-needed)
+      cat <<EOF
+2. Apply the HERMES_UPDATE_SKIP_GATEWAY_RESTART patch.  Re-run install.sh
+   with --apply-patches to git-am it automatically, or do it by hand:
+
+     cd $HERMES_AGENT_REPO
+     git am $PATCHES_DIR/0001-fix-update-allow-external-schedulers-to-skip-gateway-restart.patch
+     git rev-parse --short HEAD
+
+   Then put the new short SHA into the commit_candidates list of
+   ~/.hermes/local-patches/hermes-agent.yaml's
+   \`hermes-update-skip-gateway-restart\` entry (replacing the
+   REPLACE_WITH_YOUR_COMMIT_SHORT_SHA placeholder if that's still there).
+   Verify:
+
+     ~/.hermes/scripts/hermes-local-patches.py status
+
+   Expect: \`PATCH_COMMITTED hermes-update-skip-gateway-restart\`.
+
+EOF
+      ;;
+    am-failed)
+      cat <<EOF
+2. ✗ HERMES_UPDATE_SKIP_GATEWAY_RESTART patch apply FAILED.  Resolve the
+   conflict in $HERMES_AGENT_REPO, run \`git am --abort\` if needed, then
+   apply manually and update the manifest commit_candidates SHA.
+
+EOF
+      ;;
+    no-repo|*)
+      cat <<EOF
+2. Apply the HERMES_UPDATE_SKIP_GATEWAY_RESTART patch once
+   $HERMES_AGENT_REPO exists; install.sh ships the patch at
+   $PATCHES_DIR/0001-fix-update-allow-external-schedulers-to-skip-gateway-restart.patch
+   and \`--apply-patches\` will git-am it for you.
+
+EOF
+      ;;
+  esac
+
+  cat <<'EOF'
 3. Manually trigger one external run to verify end-to-end:
 
      systemctl --user start hermes-auto-update.service
@@ -214,6 +342,8 @@ main() {
   install_unit "$TEMPLATES/hermes-auto-update.timer"   "$SYSTEMD_USER_DIR/hermes-auto-update.timer"
 
   seed_local_patches
+
+  check_or_apply_skip_restart_patch
 
   enable_systemd_timer
 

@@ -33,17 +33,19 @@ patches:
 # upstream ever lands an equivalent flag, remove this entry — the engine
 # will detect the marker in HEAD and just report PATCH_OK forever.
 #
-# To install on a fresh machine:
-#   1. Add the env-var skip branch to hermes_cli/main.py per
-#      `references/cron-auto-update-delivery.md` "Durable fix pattern" step 1.
-#   2. `git commit` it.
-#   3. Copy the resulting short SHA into commit_candidates below.
+# `install.sh --apply-patches` will git-am the canonical patch shipped at
+#   skills/hermes-update/patches/0001-fix-update-allow-external-schedulers-to-skip-gateway-restart.patch
+# and rewrite the REPLACE_WITH_YOUR_COMMIT_SHORT_SHA placeholder below with
+# the resulting commit's short SHA.  Doing it by hand:
+#   cd ~/.hermes/hermes-agent
+#   git am ~/Code/hermes-skills/skills/hermes-update/patches/0001-*.patch
+#   git rev-parse --short HEAD   # plug into commit_candidates
 - name: hermes-update-skip-gateway-restart
   marker_file: hermes_cli/main.py
   marker_regex: HERMES_UPDATE_SKIP_GATEWAY_RESTART
   commit_candidates:
   - REPLACE_WITH_YOUR_COMMIT_SHORT_SHA
-  commit_message: 'fix(update): allow cron/systemd timer to skip gateway restart'
+  commit_message: 'fix(update): allow external schedulers to skip gateway restart'
   failure_pattern: >
     Daily systemd timer runs `hermes update` which restarts the gateway
     immediately; the hermes-auto-update-report cron job is hosted by that

@@ -30,25 +30,27 @@ In the observed May 2026 incident:
 
 ## Durable fix pattern
 
-1. Ensure `hermes update` supports skipping immediate gateway restart. In `hermes_cli/main.py`, immediately before the "Auto-restart ALL gateways after update" block, add/check:
+1. Ensure `hermes update` supports skipping the immediate gateway restart. The
+   canonical patch lives in this skill as
+   `patches/0001-fix-update-allow-external-schedulers-to-skip-gateway-restart.patch`.
+   The easiest way to apply it on a fresh machine is via the skill installer:
 
-```python
-if os.getenv("HERMES_UPDATE_SKIP_GATEWAY_RESTART", "").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}:
-    print(
-        "  ℹ Skipping gateway restart because "
-        "HERMES_UPDATE_SKIP_GATEWAY_RESTART is set"
-    )
-    print("    Restart later with: hermes gateway restart")
-    print()
-    print("Tip: You can now select a provider and model:")
-    print("  hermes model              # Select provider and model")
-    return
-```
+   ```bash
+   ~/Code/hermes-skills/skills/hermes-update/scripts/install.sh --apply-patches
+   ```
+
+   Manual equivalent:
+
+   ```bash
+   cd ~/.hermes/hermes-agent
+   git am ~/Code/hermes-skills/skills/hermes-update/patches/0001-fix-update-allow-external-schedulers-to-skip-gateway-restart.patch
+   git rev-parse --short HEAD   # plug into local-patches manifest
+   ```
+
+   The patch gates the existing "Auto-restart ALL gateways after update" block
+   in `hermes_cli/main.py` on `HERMES_UPDATE_SKIP_GATEWAY_RESTART`
+   (accepted truthy values: `1`, `true`, `yes`, `on`).  When set, the
+   updater prints an info line and returns cleanly, leaving the gateway up.
 
 2. In the cron prompt, run:
 
@@ -75,7 +77,7 @@ sleep "${HERMES_AUTO_UPDATE_RESTART_DELAY:-180}"
 } >> "$HOME/.hermes/logs/hermes-auto-update-delayed-restart.log" 2>&1
 ```
 
-5. Preserve this local fix across upstream updates by adding it to `~/.hermes/local-patches/hermes-agent.yaml` with marker `HERMES_UPDATE_SKIP_GATEWAY_RESTART` in `hermes_cli/main.py`. If using the local commit from the May 2026 incident, the commit candidate was `946f7dd8e` (`fix(update): allow cron to skip gateway restart`).
+5. Preserve this local fix across upstream updates by adding it to `~/.hermes/local-patches/hermes-agent.yaml` with marker `HERMES_UPDATE_SKIP_GATEWAY_RESTART` in `hermes_cli/main.py`. The skill's `templates/local-patches.minimal.yaml` already includes this entry; `install.sh --apply-patches` rewrites the placeholder SHA with the freshly-applied commit's short SHA automatically.
 
 ## Updating the recurring job
 

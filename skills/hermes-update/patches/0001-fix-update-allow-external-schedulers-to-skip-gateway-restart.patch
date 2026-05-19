@@ -1,0 +1,65 @@
+From 26f65952c4195e6d0b08a8ee5a6da9d81fc48614 Mon Sep 17 00:00:00 2001
+From: yuchuan <1123274330@qq.com>
+Date: Tue, 19 May 2026 15:08:04 +0800
+Subject: [PATCH] fix(update): allow external schedulers to skip gateway
+ restart
+
+External update orchestrators (systemd timer at ~/.hermes/scripts/hermes-auto-update-external.sh,
+the hermes-auto-update-report cron job) need `hermes update --yes` to finish
+without immediately restarting the gateway. Otherwise the gateway-hosted cron
+scheduler gets killed before `_deliver_result()` can flush the update report,
+producing "cannot schedule new futures after interpreter shutdown" failures.
+
+Gate the existing "Auto-restart ALL gateways after update" block on the
+HERMES_UPDATE_SKIP_GATEWAY_RESTART env var: when set to 1/true/yes/on, print
+an info line and return cleanly, letting the external orchestrator schedule
+a delayed restart via hermes-auto-update-restart-gateway.sh once the report
+has been delivered.
+
+Tracked locally via ~/.hermes/local-patches/hermes-agent.yaml entry
+`hermes-update-skip-gateway-restart`; the hermes-skills repo's
+templates/local-patches.minimal.yaml seeds this entry on fresh installs.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ hermes_cli/main.py | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/hermes_cli/main.py b/hermes_cli/main.py
+index 53cef7677..f1312f73c 100644
+--- a/hermes_cli/main.py
++++ b/hermes_cli/main.py
+@@ -8475,6 +8475,30 @@ def _cmd_update_impl(args, gateway_mode: bool):
+             except OSError:
+                 pass
+ 
++        # Local patch: allow external schedulers (systemd timer, cron) to
++        # skip the gateway restart that normally fires at the end of an
++        # update.  Restarting kills the gateway-hosted cron scheduler before
++        # `_deliver_result()` can ship the update report, producing
++        # "cannot schedule new futures after interpreter shutdown" failures.
++        # External callers should set HERMES_UPDATE_SKIP_GATEWAY_RESTART=1
++        # and schedule a delayed `hermes gateway restart` themselves (see
++        # ~/.hermes/scripts/hermes-auto-update-restart-gateway.sh).
++        if os.getenv("HERMES_UPDATE_SKIP_GATEWAY_RESTART", "").strip().lower() in {
++            "1",
++            "true",
++            "yes",
++            "on",
++        }:
++            print(
++                "  ℹ Skipping gateway restart because "
++                "HERMES_UPDATE_SKIP_GATEWAY_RESTART is set"
++            )
++            print("    Restart later with: hermes gateway restart")
++            print()
++            print("Tip: You can now select a provider and model:")
++            print("  hermes model              # Select provider and model")
++            return
++
+         # Auto-restart ALL gateways after update.
+         # The code update (git pull) is shared across all profiles, so every
+         # running gateway needs restarting to pick up the new code.
+-- 
+2.53.0
+
