@@ -10,6 +10,18 @@ set -u
 
 : "${HOME:?HOME must be set to run hermes-auto-update-restart-gateway.sh}"
 
+# `date -Is` is GNU coreutils only.  Provide a BSD-compatible fallback so this
+# helper logs a parseable ISO timestamp on macOS as well.
+if ! date -Is >/dev/null 2>&1; then
+  date() {
+    if [ "${1:-}" = "-Is" ]; then
+      command date +"%Y-%m-%dT%H:%M:%S%z"
+    else
+      command date "$@"
+    fi
+  }
+fi
+
 _extra_path="$HOME/.local/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/opt/homebrew/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 if [ -n "${PATH:-}" ]; then
   export PATH="$_extra_path:$PATH"

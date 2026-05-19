@@ -28,6 +28,100 @@ set -u
 # interactive shell, or a manual `bash hermes-auto-update-external.sh`.
 : "${HOME:?HOME must be set to run hermes-auto-update-external.sh}"
 
+# --- macOS / BSD compatibility shims --------------------------------------
+# This script was originally written for Linux + GNU coreutils + util-linux.
+# When invoked under launchd on macOS the host instead ships BSD userland and
+# lacks flock / timeout / `date -Is`.  We polyfill just enough of each to keep
+# the main body unchanged.  On Linux these shims are no-ops (the binaries are
+# preferred).
+
+# `date -Is` -> ISO 8601 timestamp.  BSD `date` doesn't recognise `-I`; emit
+# the same canonical shape `YYYY-MM-DDTHH:MM:SS+ZZZZ` instead.  Tools that
+# parse our state JSON only need ISO-ish, not strict GNU output.
+if ! date -Is >/dev/null 2>&1; then
+  date() {
+    if [ "${1:-}" = "-Is" ]; then
+      command date +"%Y-%m-%dT%H:%M:%S%z"
+    else
+      command date "$@"
+    fi
+  }
+fi
+
+# `flock` -> mkdir-based advisory lock.  POSIX mkdir is atomic on every
+# filesystem that supports directories, so it gives us the same "first writer
+# wins" semantics flock provides.  We only emulate the single shape this
+# script uses: `flock -n <fd>` for non-blocking acquisition.  The lock file
+# path is derived from the caller's `$LOCK` variable, not the fd.
+if ! command -v flock >/dev/null 2>&1; then
+  flock() {
+    local nonblock=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -n|--nb|--nonblock) nonblock=1; shift ;;
+        -*) shift ;;
+        *) shift ;;  # fd number; we ignore it and use $LOCK
+      esac
+    done
+    local lockdir="${LOCK:?LOCK must be set when emulating flock}.d"
+    if mkdir "$lockdir" 2>/dev/null; then
+      printf '%s\n' "$$" > "$lockdir/pid"
+      # Ensure the lock is released on any normal or signal exit.  We do not
+      # append to existing traps because this script sets no other EXIT trap;
+      # if that changes, switch to a trap-append helper.
+      trap "rmdir '$lockdir' 2>/dev/null || true" EXIT INT TERM HUP
+      return 0
+    fi
+    if [ "$nonblock" -eq 1 ]; then
+      return 1
+    fi
+    # Blocking semantics aren't used by this script; fail loudly if asked.
+    echo "flock shim: blocking acquisition not implemented" >&2
+    return 2
+  }
+fi
+
+# `timeout` -> watchdog wrapper.  We only emulate the one-shot form
+# `timeout <spec> <cmd...>`.  The duration spec accepts s/m/h suffixes like
+# GNU timeout; everything else is treated as plain seconds.  SIGTERM first,
+# SIGKILL after 10s, matching GNU's default escalation.
+if ! command -v timeout >/dev/null 2>&1; then
+  if command -v gtimeout >/dev/null 2>&1; then
+    timeout() { gtimeout "$@"; }
+  else
+    timeout() {
+      local spec="$1"; shift
+      local secs
+      case "$spec" in
+        *h) secs=$(( ${spec%h} * 3600 )) ;;
+        *m) secs=$(( ${spec%m} * 60 )) ;;
+        *s) secs=${spec%s} ;;
+        *)  secs="$spec" ;;
+      esac
+      "$@" &
+      local pid=$!
+      (
+        sleep "$secs"
+        if kill -0 "$pid" 2>/dev/null; then
+          kill -TERM "$pid" 2>/dev/null
+          sleep 10
+          kill -KILL "$pid" 2>/dev/null || true
+        fi
+      ) &
+      local watchdog=$!
+      # `wait` returns the child's exit status; if it was killed by signal N
+      # bash sets that to 128+N, which matches GNU timeout's 124 convention
+      # closely enough for the callers in this repo.
+      local rc=0
+      wait "$pid" || rc=$?
+      kill "$watchdog" 2>/dev/null || true
+      wait "$watchdog" 2>/dev/null || true
+      return "$rc"
+    }
+  fi
+fi
+# --------------------------------------------------------------------------
+
 # Prepend the locations Hermes is typically installed in, but keep whatever
 # PATH the caller already had so user-specific tooling (asdf, pyenv, nix,
 # brew on macOS, ...) still works.  Linuxbrew is included because that's
