@@ -38,6 +38,30 @@ Hermes 与 Claude Code 之间使用 **ACP（Agent Client Protocol）**——一�
 
 `claude-as-acp` wrapper 的核心规则：**同名 `--task` = 自动续接 session；不同名 = 全新 session**。详细用法见 `delegate-to-claude-code-acp` skill。
 
+### ⚠️ macOS 本机：`claude-as-acp` 不可用，用 `claude -p` 替代
+
+`claude-as-acp` 和 `claude-agent-acp` 是 **openclaw 服务器平台特有的 wrapper**，官方 Claude Code CLI（`~/.local/bin/claude`）没有内置 ACP server 模式（`claude --help` 无 `--acp`/`--stdio` 选项，经 v2.1.145 验证）。**不要在本机尝试 `claude-as-acp`，命令不存在会直接 exit 127。**
+
+**本机 macOS 各场景推荐方式：**
+
+| 场景 | 方式 |
+|---|---|
+| 一次性任务（代码生成、报告、重构）| `claude -p` + `--dangerously-skip-permissions` |
+| 多轮交互式 | `tmux` + `claude`（交互 TUI） |
+| 多任务并行 | 多个 `tmux session` 分别跑 |
+| session 续接 | `claude -p --continue` 或 `--resume <session_id>` |
+
+`claude -p` 是本机对 ACP 的等价替代：同样无人值守、自动读取 CLAUDE.md、支持 session 续接，输出为纯文本（而非 NDJSON），对绝大多数自动化任务完全够用。
+
+```bash
+# 本机推荐写法（长任务 background）
+terminal(
+  command="claude -p '任务描述' --dangerously-skip-permissions --max-turns 50",
+  workdir="/path/to/project",
+  background=True, notify_on_complete=True
+)
+```
+
 ---
 
 ## Two Orchestration Modes
