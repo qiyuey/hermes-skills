@@ -235,6 +235,10 @@ uv pip install -e . \
 
 3. **Hermes cron reporter** `hermes-auto-update-report.py`：在 17:15 只读取 `latest.json` 并汇报：无更新输出 `[SILENT]`；有更新/失败/patch_failed 才发消息。这个 cron 不再执行 update，所以不会被 gateway restart 打断。
 
+   reporter cron job 的 prompt 规则（`status=updated` 时）：
+   - 汇报 version/head/origin、patch 验证/恢复状态、log 路径。
+   - **必须额外读取 changelog**：运行 `gh release list --repo NousResearch/hermes-agent --limit 3` + `gh release view <最新tag> --repo NousResearch/hermes-agent`，提取 3-5 条相关更新内容附在报告里（标题"## 更新内容"）。gh 失败时跳过并注明"(changelog 获取失败)"。
+
 修改了什么不要忘了：
 - 把 `HERMES_UPDATE_SKIP_GATEWAY_RESTART` 本地 patch 记录进 `~/.hermes/local-patches/hermes-agent.yaml`，否则 upstream update 可能覆盖该能力。
 - 自动更新所有脚本的**源文件**都在 `~/Code/hermes-skills/skills/hermes-update/scripts/`，跟 SKILL 一起 git 管理（仓库 `qiyuey/hermes-skills`）。`~/.hermes/scripts/` 下的同名文件是 symlink 或薄 wrapper（见下方"脚本布局"），改逻辑请改 repo 里的源文件。
