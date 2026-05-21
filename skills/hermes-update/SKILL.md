@@ -221,7 +221,7 @@ uv pip install -e . \
 当前实现把 `hermes update` 放到 **OS 级 timer**（独立于 gateway）：
 
 1. **外部 timer**：
-   - **Linux** — systemd user timer `hermes-auto-update.timer` → `hermes-auto-update.service`，每天 17:00（`OnCalendar` 可改）触发 `~/.hermes/scripts/hermes-auto-update-external.sh`。
+   - **Linux** — systemd user timer `hermes-auto-update.timer` → `hermes-auto-update.service`，每周三 17:00（`OnCalendar=Wed *-*-* 17:00:00`，可改）触发 `~/.hermes/scripts/hermes-auto-update-external.sh`。
    - **macOS** — LaunchAgent `~/Library/LaunchAgents/com.hermes.auto-update.plist`（label `com.hermes.auto-update`），`StartCalendarInterval` 同样设到 17:00 触发同一份 `hermes-auto-update-external.sh`。`StartCalendarIntervalCoalesce=true` 等效 systemd 的 `Persistent=true`，错过点位机器唤醒后会补跑一次。
 
 2. **`hermes-auto-update-external.sh` 流程**（两个平台共用一份）：
