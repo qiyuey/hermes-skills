@@ -6,7 +6,7 @@
 #   1. Snapshot working-tree state and current vs origin/main
 #   2. Recover any unstaged changes that match a registered local patch
 #      (so they become real commits before `hermes update` autostashes them)
-#   3. Run `hermes update` with HERMES_UPDATE_SKIP_GATEWAY_RESTART=1
+#   3. Run `hermes update --yes --no-restart`
 #   4. Verify all registered patches via the patch engine; cherry-pick any
 #      that are missing.  IMPORTANT: never bail out on a single conflict —
 #      report and move on so unrelated patches still get applied.
@@ -256,7 +256,7 @@ export STARTED_AT="$(date +%Y-%m-%dT%H:%M:%S%z)"
 
   echo "=== update ==="
   set +e
-  HERMES_UPDATE_SKIP_GATEWAY_RESTART=1 timeout 45m "$HERMES_BIN" update --yes
+  timeout 45m "$HERMES_BIN" update --yes --no-restart
   UPDATE_RC=$?
   set -e
   echo "UPDATE_RC $UPDATE_RC"

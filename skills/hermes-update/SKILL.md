@@ -96,7 +96,7 @@ log=/tmp/hermes-update-$(date +%Y%m%d-%H%M%S).log
   echo '=== pre-update patch recovery ==='
   ~/.hermes/scripts/hermes-local-patches.py recover || true
   echo '=== update ==='
-  HERMES_UPDATE_SKIP_GATEWAY_RESTART=1 hermes update --yes
+  hermes update --yes --no-restart
   echo '=== after ==='
   hermes --version || true
   echo '=== git ==='
@@ -169,7 +169,7 @@ uv pip install -e . \
    剩余未识别的改动在更新前先 `git diff` 检查；非临时调试就 `git commit`，再决定是否登记 manifest。
 
 4. 如果需要更新：
-   运行 `HERMES_UPDATE_SKIP_GATEWAY_RESTART=1 hermes update --yes`，完整捕获输出。
+   运行 `hermes update --yes --no-restart`，完整捕获输出。
 
 5. 更新后验证：
    hermes --version
@@ -228,7 +228,7 @@ uv pip install -e . \
    - 锁防重入（Linux 用 `flock(1)`，macOS 用脚本内置的 `mkdir(2)` 锁 polyfill）
    - 启用 git rerere 记忆冲突解决
    - 跑 `hermes-local-patches.py recover`（commit autostash 残留）
-   - `HERMES_UPDATE_SKIP_GATEWAY_RESTART=1 hermes update --yes`（macOS 上脚本顶部还 polyfill 了 `timeout(1)` 和 `date -Is`）
+   - `hermes update --yes --no-restart`（macOS 上脚本顶部还 polyfill 了 `timeout(1)` 和 `date -Is`）
    - 跑 `hermes-local-patches.py apply`（cherry-pick 缺失 patch；冲突不会中断）
    - 写状态到 `~/.hermes/state/auto-update/latest.json` + 日志到 `~/.hermes/logs/auto-update/<run_id>.log`
    - 启动 `hermes-auto-update-restart-gateway.sh` 异步等 180 秒后再重启 gateway，避开投递竞态。
@@ -240,7 +240,7 @@ uv pip install -e . \
    - **必须额外读取 changelog**：运行 `gh release list --repo NousResearch/hermes-agent --limit 3` + `gh release view <最新tag> --repo NousResearch/hermes-agent`，提取 3-5 条相关更新内容附在报告里（标题"## 更新内容"）。gh 失败时跳过并注明"(changelog 获取失败)"。
 
 修改了什么不要忘了：
-- 把 `HERMES_UPDATE_SKIP_GATEWAY_RESTART` 本地 patch 记录进 `~/.hermes/local-patches/hermes-agent.yaml`，否则 upstream update 可能覆盖该能力。
+- 把 `--no-restart` 本地 patch 记录进 `~/.hermes/local-patches/hermes-agent.yaml`，否则 upstream update 可能覆盖该能力。
 - 自动更新所有脚本的**源文件**都在 `~/Code/hermes-skills/skills/hermes-update/scripts/`，跟 SKILL 一起 git 管理（仓库 `qiyuey/hermes-skills`）。`~/.hermes/scripts/` 下的同名文件是 symlink 或薄 wrapper（见下方"脚本布局"），改逻辑请改 repo 里的源文件。
 
 排查时看：
@@ -312,7 +312,7 @@ gh repo clone qiyuey/hermes-skills "$HOME/Code/hermes-skills"
 
 仓库里 `skills/hermes-update/patches/` 目录是所有上游 hermes-agent patch 的 canonical 来源，用 `git format-patch` 格式打包，可以直接 `git am` 重放出一致 commit：
 
-- `0001-fix-update-allow-external-schedulers-to-skip-gateway-restart.patch` — `HERMES_UPDATE_SKIP_GATEWAY_RESTART` 环境变量闸门，让外部 scheduler 跳过 gateway 自动重启。`install.sh --apply-patches` 默认应用。
+- `0001-feat-update-add-no-restart-flag.patch` — `--no-restart` CLI flag，让外部 scheduler 跳过 gateway 自动重启。`install.sh --apply-patches` 默认应用。
 
 未来新增 patch 时遵循同样的约定（`format-patch` 输出 + manifest `commit_candidates` 占位 + install.sh 自动 am），让一行 `install.sh --apply-patches` 永远是新机器的入口。
 
