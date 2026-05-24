@@ -280,7 +280,7 @@ cfg['providers']['company_model'] = {
 
 p.parent.mkdir(parents=True, exist_ok=True)
 p.write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding='utf-8')
-print('CONFIGURED_COMPANY_GPT')
+print('CONFIGURED_COMPANY_MODEL')
 PY
 ```
 
