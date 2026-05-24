@@ -15,8 +15,8 @@ description: 帮助公司同事在 macOS 上安装 Hermes Agent，并配置使�
 - Hermes 走 OpenAI-compatible Chat Completions：`/v1/chat/completions`
 - `/v1/models` 可能返回 404，不要依赖它做可用性判断
 - 默认模型：`gpt-5.5`
-- API key 建议写入 `~/.hermes/.env`：`COMPANY_GPT_API_KEY=...`
-- Hermes config 使用 keyed `providers:` schema，provider 名称：`custom:company_gpt`
+- API key 建议写入 `~/.hermes/.env`：`COMPANY_MODEL_API_KEY=...`
+- Hermes config 使用 keyed `providers:` schema，provider 名称：`custom:company_model`
 - 必须显式设置 `api_mode: chat_completions`，避免 GPT-5.x 启发式误走 Responses API
 
 ---
@@ -43,7 +43,7 @@ description: 帮助公司同事在 macOS 上安装 Hermes Agent，并配置使�
 
 ### 2.1 获取 key
 
-按优先级获取 `COMPANY_GPT_API_KEY`：
+按优先级获取 `COMPANY_MODEL_API_KEY`：
 
 1. 用户直接提供 `sk-mg-...` key：使用该值。
 2. 用户授权读取 Codex 配置：从 `~/.codex/auth.json` 提取 `OPENAI_API_KEY`。
@@ -71,7 +71,7 @@ PY
 mkdir -p ~/.hermes
 python3 - <<'PY'
 import os, pathlib
-key = os.environ['COMPANY_GPT_API_KEY']
+key = os.environ['COMPANY_MODEL_API_KEY']
 env_path = pathlib.Path.home() / '.hermes' / '.env'
 lines = []
 if env_path.exists():
@@ -79,20 +79,20 @@ if env_path.exists():
 new_lines = []
 written = False
 for line in lines:
-    if line.startswith('COMPANY_GPT_API_KEY='):
-        new_lines.append('COMPANY_GPT_API_KEY=' + key)
+    if line.startswith('COMPANY_MODEL_API_KEY='):
+        new_lines.append('COMPANY_MODEL_API_KEY=' + key)
         written = True
     else:
         new_lines.append(line)
 if not written:
-    new_lines.append('COMPANY_GPT_API_KEY=' + key)
+    new_lines.append('COMPANY_MODEL_API_KEY=' + key)
 env_path.write_text('\n'.join(new_lines).rstrip() + '\n', encoding='utf-8')
 os.chmod(env_path, 0o600)
-print('WROTE_COMPANY_GPT_API_KEY')
+print('WROTE_COMPANY_MODEL_API_KEY')
 PY
 ```
 
-> 执行时通过 shell 环境变量传入 `COMPANY_GPT_API_KEY`，避免把 key 写进命令历史。若工具不方便传 env，可用 Python 脚本读取临时文件，写完后删除临时文件。
+> 执行时通过 shell 环境变量传入 `COMPANY_MODEL_API_KEY`，避免把 key 写进命令历史。若工具不方便传 env，可用 Python 脚本读取临时文件，写完后删除临时文件。
 
 ---
 
@@ -234,13 +234,13 @@ brew --version 2>/dev/null && echo "BREW_OK" || echo "BREW_MISSING"
 ### 8.1 设置默认模型
 
 ```bash
-hermes config set model.provider custom:company_gpt
+hermes config set model.provider custom:company_model
 hermes config set model.default gpt-5.5
 hermes config set model.base_url ''
 hermes config set model.api_key ''
 ```
 
-### 8.2 合并 `providers.company_gpt`
+### 8.2 合并 `providers.company_model`
 
 使用 Python 安全合并 YAML，保留用户现有配置：
 
@@ -260,17 +260,17 @@ if not isinstance(cfg, dict):
 
 cfg.setdefault('model', {})
 cfg['model'].update({
-    'provider': 'custom:company_gpt',
+    'provider': 'custom:company_model',
     'default': 'gpt-5.5',
     'base_url': '',
     'api_key': '',
 })
 
 cfg.setdefault('providers', {})
-cfg['providers']['company_gpt'] = {
+cfg['providers']['company_model'] = {
     'name': '公司 Model 平台',
     'base_url': 'https://model.zhenguanyu.com/v1',
-    'key_env': 'COMPANY_GPT_API_KEY',
+    'key_env': 'COMPANY_MODEL_API_KEY',
     'default_model': 'gpt-5.5',
     'api_mode': 'chat_completions',
     'models': {
@@ -297,15 +297,15 @@ python3 -m pip install pyyaml
 ```yaml
 model:
   default: gpt-5.5
-  provider: custom:company_gpt
+  provider: custom:company_model
   base_url: ''
   api_key: ''
 
 providers:
-  company_gpt:
+  company_model:
     name: 公司 Model 平台
     base_url: https://model.zhenguanyu.com/v1
-    key_env: COMPANY_GPT_API_KEY
+    key_env: COMPANY_MODEL_API_KEY
     default_model: gpt-5.5
     api_mode: chat_completions
     models:
@@ -336,7 +336,7 @@ PY
 期望输出：
 
 ```text
-model.provider = custom:company_gpt
+model.provider = custom:company_model
 model.default = gpt-5.5
 resolved.provider = custom
 api_mode = chat_completions
@@ -351,7 +351,7 @@ has_api_key = True
 ```bash
 set -a; source ~/.hermes/.env; set +a
 curl -sS https://model.zhenguanyu.com/v1/chat/completions \
-  -H "Authorization: Bearer $COMPANY_GPT_API_KEY" \
+  -H "Authorization: Bearer $COMPANY_MODEL_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-5.5","messages":[{"role":"user","content":"hi"}],"max_tokens":5}' \
   | python3 -m json.tool
@@ -377,9 +377,9 @@ hermes chat -q "请用一句话介绍你自己"
 您现在可以使用以下方式使用 Hermes：
 - 打开终端，输入 hermes 即可开始对话
 - 默认模型已配置为公司 Model 平台的 gpt-5.5
-- API key 已保存在 ~/.hermes/.env 的 COMPANY_GPT_API_KEY 中
+- API key 已保存在 ~/.hermes/.env 的 COMPANY_MODEL_API_KEY 中
 
-如果后续更换 key，只需要更新 ~/.hermes/.env 里的 COMPANY_GPT_API_KEY。
+如果后续更换 key，只需要更新 ~/.hermes/.env 里的 COMPANY_MODEL_API_KEY。
 ```
 
 ---
@@ -392,5 +392,5 @@ hermes chat -q "请用一句话介绍你自己"
 - pip/uv 下载包很慢或超时：确认 MirrorZ 镜像配置已执行；检查 `pip config list` 是否显示 MirrorZ 地址。
 - `/v1/models` 返回 404：正常现象；公司平台不暴露 models route，用 `/v1/chat/completions` 验证。
 - `token 不允许使用模型 gpt-5.5`：endpoint 正常但 token 权限不足，请用户确认 token 是否开通 `gpt-5.5`。
-- Hermes 误走 `/v1/responses`：确认 `providers.company_gpt.api_mode: chat_completions` 已写入 config。
-- `model.provider 'custom:company_gpt' is not a recognised provider`：可能是 Hermes doctor 校验漂移；以 runtime provider 解析和实际 `hermes chat -q` 为准，必要时更新 Hermes。
+- Hermes 误走 `/v1/responses`：确认 `providers.company_model.api_mode: chat_completions` 已写入 config。
+- `model.provider 'custom:company_model' is not a recognised provider`：可能是 Hermes doctor 校验漂移；以 runtime provider 解析和实际 `hermes chat -q` 为准，必要时更新 Hermes。
