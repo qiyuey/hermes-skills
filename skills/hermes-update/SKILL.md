@@ -1,5 +1,5 @@
 ---
-name: hermes-post-update
+name: hermes-update
 description: Use when the user asks to update, upgrade, check, or troubleshoot Hermes Agent itself, especially from Telegram/WeChat gateway sessions.
 version: 5.0.0
 author: Hermes Agent
@@ -10,8 +10,6 @@ metadata:
 ---
 
 # Hermes 更新流程
-
-> NOTE: This skill's canonical file is at `~/.hermes/skills/hermes-update/SKILL.md` due to a directory/frontmatter name mismatch. `skill_manage` cannot resolve it by name. To edit, use `terminal` to edit the file directly, or rename the directory to `hermes-post-update`. The sibling copy at `~/.hermes/skills/hermes-post-update/SKILL.md` mirrors this file — keep both in sync until the rename happens.
 
 ## 核心原则
 
@@ -340,7 +338,6 @@ gh repo clone qiyuey/hermes-skills "$HOME/Code/hermes-skills"
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| `skill_view("hermes-post-update")` 失败 | skill 目录名（hermes-update）和 frontmatter name（hermes-post-update）不一致 | skill_manage 无法按名字定位；用 terminal 直接编辑 `~/.hermes/skills/hermes-update/SKILL.md`，或将目录改名为 hermes-post-update |
 | cron 一次性任务没回报 | 还在 scheduled、gateway 重启、或任务被旧 scheduler 状态覆盖 | 先查 cron list，再用版本/git/log 复核实际状态 |
 | `hermes update` 后 process not_found | gateway 重启导致进程跟踪句柄丢失 | 读日志 + `hermes --version` 复核 |
 | update 提示 local changes restored | autostash 正常恢复本地改动 | 跑 `git status --short`，再跑 `hermes-local-patches.py apply` 让 unstaged 自动归位 |
