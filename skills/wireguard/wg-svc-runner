@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# Foreground supervisor for one WireGuard interface on macOS.
+# Replaces wg-quick: drives wireguard-go + wg + ifconfig + route directly so that
+# launchd can monitor a single, real PID and tear everything down cleanly.
+#
+# Run by LaunchDaemon as root. Do NOT invoke manually.
+
+set -euo pipefail
+
+NAME="${1:-wg0}"
+CONF="/opt/homebrew/etc/wireguard/${NAME}.conf"
+
+WIREGUARD_GO="/opt/homebrew/bin/wireguard-go"
+WG="/opt/homebrew/bin/wg"
+IFCONFIG="/sbin/ifconfig"
+ROUTE="/sbin/route"
+
+MTU=1420   # standard WireGuard payload MTU over IPv4
+
+log() { echo "[wg-svc-runner ${NAME}] $(date '+%F %T') $*"; }
+die() { log "ERROR: $*"; exit 1; }
+
+[[ -r "$CONF" ]] || die "config $CONF not readable"
+
+# --- parse the conf file -----------------------------------------------------
+get_iface_field() {
+    awk -v k="$1" '
+        /^\[Interface\]/ {s=1; next}
+        /^\[/            {s=0}
+        s && $0 ~ "^[[:space:]]*"k"[[:space:]]*=" {
+            sub("^[[:space:]]*"k"[[:space:]]*=[[:space:]]*","")
+            sub(/[[:space:]]+#.*$/, "")
+            print
+            exit
+        }' "$CONF"
+}
+
+ADDRESS="$(get_iface_field Address)"
+[[ -n "$ADDRESS" ]] || die "[Interface] Address= missing in $CONF"
+ADDRESS_IP="${ADDRESS%%/*}"
+
+# Collect every AllowedIPs across every [Peer] for routing.
+ROUTES=()
+while IFS= read -r line; do
+    [[ -n "$line" ]] && ROUTES+=("$line")
+done < <(awk '
+    /^\[Peer\]/ {s=1; next}
+    /^\[/       {s=0}
+    s && /^[[:space:]]*AllowedIPs[[:space:]]*=/ {
+        sub(/^[[:space:]]*AllowedIPs[[:space:]]*=[[:space:]]*/, "")
+        sub(/[[:space:]]+#.*$/, "")
+        n = split($0, a, /[[:space:]]*,[[:space:]]*/)
+        for (i=1; i<=n; i++) print a[i]
+    }' "$CONF")
+
+# --- runtime state -----------------------------------------------------------
+NAME_FILE="$(mktemp -t "wg-${NAME}-name.XXXXXX")"
+WG_PID=""
+IFACE=""
+CLEANED=0
+
+cleanup() {
+    [[ "$CLEANED" -eq 1 ]] && return
+    CLEANED=1
+    log "cleanup begin"
+    if [[ -n "$IFACE" ]]; then
+        for r in "${ROUTES[@]}"; do
+            log "del route $r"
+            "$ROUTE" -q -n delete -inet "$r" -interface "$IFACE" 2>/dev/null || true
+        done
+        log "ifconfig $IFACE down"
+        "$IFCONFIG" "$IFACE" down 2>/dev/null || true
+    fi
+    if [[ -n "$WG_PID" ]] && kill -0 "$WG_PID" 2>/dev/null; then
+        log "TERM wireguard-go pid $WG_PID"
+        kill -TERM "$WG_PID" 2>/dev/null || true
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            kill -0 "$WG_PID" 2>/dev/null || break
+            sleep 0.5
+        done
+        kill -KILL "$WG_PID" 2>/dev/null || true
+    fi
+    rm -f "$NAME_FILE"
+    log "cleanup done"
+}
+on_signal() { log "signal received"; cleanup; exit 0; }
+trap on_signal TERM INT HUP
+trap cleanup   EXIT
+
+# --- start wireguard-go (foreground, as our child) ---------------------------
+log "starting wireguard-go (foreground)"
+WG_TUN_NAME_FILE="$NAME_FILE" "$WIREGUARD_GO" -f utun &
+WG_PID=$!
+
+# Wait up to ~5s for the kernel to hand us a utun name.
+for _ in $(seq 1 50); do
+    [[ -s "$NAME_FILE" ]] && break
+    kill -0 "$WG_PID" 2>/dev/null || die "wireguard-go exited before creating tun"
+    sleep 0.1
+done
+IFACE="$(cat "$NAME_FILE")"
+[[ -n "$IFACE" ]] || die "wireguard-go did not export a utun name"
+log "tun ready: $IFACE (wireguard-go pid $WG_PID)"
+
+# --- push cryptokey routing into the kernel via the UAPI socket -------------
+# wg(8) setconf reads [Interface] PrivateKey/ListenPort/FwMark and every [Peer].
+# Strip wg-quick-only keys so older wg builds don't reject the file.
+TMP_CONF="$(mktemp -t "wg-${NAME}-conf.XXXXXX")"
+trap 'rm -f "$TMP_CONF" "$NAME_FILE"; cleanup' EXIT
+awk '
+    /^\[Interface\]/ {s="iface"; print; next}
+    /^\[Peer\]/      {s="peer";  print; next}
+    /^\[/            {s="other"; print; next}
+    s=="iface" && /^[[:space:]]*(Address|DNS|MTU|Table|PreUp|PostUp|PreDown|PostDown|SaveConfig)[[:space:]]*=/ {next}
+    {print}
+' "$CONF" > "$TMP_CONF"
+chmod 600 "$TMP_CONF"
+log "wg setconf $IFACE"
+"$WG" setconf "$IFACE" "$TMP_CONF"
+rm -f "$TMP_CONF"
+
+# --- assign IP, bring up, set MTU -------------------------------------------
+log "ifconfig $IFACE inet $ADDRESS_IP/32 $ADDRESS_IP alias"
+"$IFCONFIG" "$IFACE" inet "${ADDRESS_IP}/32" "$ADDRESS_IP" alias
+"$IFCONFIG" "$IFACE" mtu "$MTU"
+"$IFCONFIG" "$IFACE" up
+
+# --- routes ------------------------------------------------------------------
+for r in "${ROUTES[@]}"; do
+    log "add route $r -> $IFACE"
+    "$ROUTE" -q -n add -inet "$r" -interface "$IFACE"
+done
+
+log "up; waiting on wireguard-go ($WG_PID)"
+wait "$WG_PID" 2>/dev/null || true
+log "wireguard-go exited; runner exiting"

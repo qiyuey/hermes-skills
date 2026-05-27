@@ -1,0 +1,18 @@
+# Template only. Copy to ${XDG_CONFIG_HOME:-~/.config}/wireguard/wg0.conf (mode 0600)
+# and fill in your real keys / endpoint. NEVER commit the filled-in copy.
+#
+#   mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/wireguard"
+#   chmod 700 "${XDG_CONFIG_HOME:-$HOME/.config}/wireguard"
+#   install -m 0600 wg0.conf.example "${XDG_CONFIG_HOME:-$HOME/.config}/wireguard/wg0.conf"
+#   $EDITOR "${XDG_CONFIG_HOME:-$HOME/.config}/wireguard/wg0.conf"
+
+[Interface]
+PrivateKey = REPLACE_WITH_BASE64_PRIVATE_KEY
+Address = 192.168.10.X/32
+
+[Peer]
+PublicKey = REPLACE_WITH_PEER_PUBLIC_KEY
+PresharedKey = REPLACE_WITH_PRESHARED_KEY
+AllowedIPs = 192.168.1.0/24, 192.168.10.0/24
+Endpoint = your.endpoint.example:51820
+PersistentKeepalive = 25

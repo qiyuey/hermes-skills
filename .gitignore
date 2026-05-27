@@ -1,2 +1,8 @@
 .DS_Store
 __pycache__/
+
+# Secrets — WireGuard real config must never enter the repo.
+# Canonical location: ${XDG_CONFIG_HOME:-~/.config}/wireguard/wg0.conf
+skills/wireguard/wg0.conf
+**/wg0.conf
+!skills/wireguard/wg0.conf.example
