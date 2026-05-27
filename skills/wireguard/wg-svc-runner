@@ -16,9 +16,24 @@ IFCONFIG="/sbin/ifconfig"
 ROUTE="/sbin/route"
 DIG="/usr/bin/dig"
 HOST="/usr/bin/host"
+CURL="/usr/bin/curl"
 
-MTU=1420            # standard WireGuard payload MTU over IPv4
-DDNS_POLL_SEC=60    # how often the watchdog re-resolves peer endpoints
+MTU=1420                # standard WireGuard payload MTU over IPv4
+DDNS_POLL_SEC=60        # how often the watchdog re-resolves peer endpoints
+HEALTHY_HS_AGE_SEC=180  # below this, the tunnel is considered alive and the
+                        # watchdog will NOT re-point the endpoint even if DNS
+                        # changes — avoids chasing a flapping DDNS while a
+                        # working session is in progress.
+
+# DoH endpoints, queried in order. Each must accept the JSON variant
+# (?name=&type=A with Accept: application/dns-json). AliDoH is closest to the
+# authoritative NS for *.qiyuey.top and gives the freshest TTL; Cloudflare is a
+# cross-operator backup.
+DOH_URLS=(
+    "https://dns.alidns.com/resolve"
+    "https://1.1.1.1/dns-query"
+    "https://223.5.5.5/resolve"
+)
 
 log() { echo "[wg-svc-runner ${NAME}] $(date '+%F %T') $*"; }
 die() { log "ERROR: $*"; exit 1; }
@@ -40,16 +55,35 @@ is_fake_ip() {
     return 1
 }
 
-# resolve_host <fqdn>  → prints first A record IPv4, or empty if unresolved.
-# Prefers `dig` (no caching), falls back to `host`, finally getent-style.
+# doh_resolve <url> <fqdn>  → first A record IPv4 from one DoH endpoint, or empty.
+# Uses the JSON variant (works on AliDoH, Cloudflare, Google, Quad9). Strict 4s
+# total budget so a wedged DoH cannot stall the watchdog.
+doh_resolve() {
+    local url="$1" fqdn="$2"
+    "$CURL" -s --max-time 4 --connect-timeout 2 \
+        -H 'Accept: application/dns-json' \
+        --resolve 'dns.alidns.com:443:223.5.5.5' \
+        --resolve 'dns.alidns.com:443:223.6.6.6' \
+        "${url}?name=${fqdn}&type=A" 2>/dev/null \
+        | tr ',' '\n' \
+        | awk -F'"' '/"data":/ && $4 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print $4; exit}'
+}
+
+# resolve_host <fqdn>  → first A record IPv4, or empty if unresolved.
+# DoH first (bypasses any local stub resolver / Clash cache), then falls back
+# through dig/host/dscacheutil so we still get an answer if all DoH paths fail.
 resolve_host() {
-    local fqdn="$1" out=""
+    local fqdn="$1" out="" url
+    for url in "${DOH_URLS[@]}"; do
+        out="$(doh_resolve "$url" "$fqdn")"
+        [[ -n "$out" ]] && { printf '%s' "$out"; return 0; }
+    done
     if [[ -x "$DIG" ]]; then
-        out="$($DIG +short +time=2 +tries=1 "$fqdn" A 2>/dev/null \
+        out="$($DIG +short +time=2 +tries=1 @223.5.5.5 "$fqdn" A 2>/dev/null \
             | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/{print; exit}')"
     fi
     if [[ -z "$out" && -x "$HOST" ]]; then
-        out="$($HOST -W 2 -t A "$fqdn" 2>/dev/null \
+        out="$($HOST -W 2 -t A "$fqdn" 223.5.5.5 2>/dev/null \
             | awk '/has address/ {print $4; exit}')"
     fi
     if [[ -z "$out" ]]; then
@@ -57,6 +91,17 @@ resolve_host() {
             | awk '/^ip_address:/ {print $2; exit}')"
     fi
     printf '%s' "$out"
+}
+
+# tunnel_handshake_age <iface> <pubkey>  → seconds since last successful
+# handshake for that peer, or a very large number if never handshook.
+tunnel_handshake_age() {
+    local iface="$1" pk="$2" hs now
+    hs="$("$WG" show "$iface" latest-handshakes 2>/dev/null \
+        | awk -v k="$pk" '$1==k {print $2; exit}')"
+    [[ -z "$hs" || "$hs" == "0" ]] && { printf '%s' "999999"; return; }
+    now="$(date +%s)"
+    printf '%s' "$(( now - hs ))"
 }
 
 [[ -r "$CONF" ]] || die "config $CONF not readable"
@@ -178,7 +223,7 @@ ddns_watchdog() {
     done
     while sleep "$DDNS_POLL_SEC"; do
         for ((j=0; j<n; j++)); do
-            local new_ip
+            local new_ip hs_age
             new_ip="$(resolve_host "${hosts[j]}")"
             if [[ -z "$new_ip" ]]; then
                 log "ddns: WARN unable to resolve ${hosts[j]} (will retry next tick)"
@@ -188,14 +233,26 @@ ddns_watchdog() {
                 log "ddns: WARN ${hosts[j]} resolved to FAKE-IP $new_ip — ignoring this tick"
                 continue
             fi
-            if [[ "$new_ip" != "${last_ips[j]}" ]]; then
-                log "ddns: ${hosts[j]} ${last_ips[j]:-<unset>} -> $new_ip ; updating peer"
-                if "$WG" set "$iface" peer "${pubkeys[j]}" endpoint "${new_ip}:${ports[j]}"; then
-                    last_ips[j]="$new_ip"
-                    log "ddns: peer ${pubkeys[j]:0:8}... endpoint updated to ${new_ip}:${ports[j]}"
-                else
-                    log "ddns: ERROR wg set failed for ${pubkeys[j]:0:8}..."
-                fi
+            if [[ "$new_ip" == "${last_ips[j]}" ]]; then
+                continue
+            fi
+            # DNS changed. Decide whether to act based on tunnel health: if the
+            # last handshake is recent, the current endpoint is clearly working
+            # and we should NOT chase a (possibly flapping) DDNS — that just
+            # interrupts an in-progress session for no benefit. Re-evaluate on
+            # the next poll; if the tunnel actually breaks, hs_age will grow
+            # past the threshold and we'll pick up the new IP then.
+            hs_age="$(tunnel_handshake_age "$iface" "${pubkeys[j]}")"
+            if [[ "$hs_age" -lt "$HEALTHY_HS_AGE_SEC" ]]; then
+                log "ddns: ${hosts[j]} ${last_ips[j]:-<unset>} -> $new_ip but hs_age=${hs_age}s < ${HEALTHY_HS_AGE_SEC}s, deferring"
+                continue
+            fi
+            log "ddns: ${hosts[j]} ${last_ips[j]:-<unset>} -> $new_ip (hs_age=${hs_age}s, tunnel stale) ; updating peer"
+            if "$WG" set "$iface" peer "${pubkeys[j]}" endpoint "${new_ip}:${ports[j]}"; then
+                last_ips[j]="$new_ip"
+                log "ddns: peer ${pubkeys[j]:0:8}... endpoint updated to ${new_ip}:${ports[j]}"
+            else
+                log "ddns: ERROR wg set failed for ${pubkeys[j]:0:8}..."
             fi
         done
     done

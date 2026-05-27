@@ -170,7 +170,8 @@ tail -n 50 /var/log/wireguard-wg0.log
 | 修改了 `~/Code/hermes-skills/skills/wireguard/wg0.conf` 但不生效 | 忘了同步到 `/opt/homebrew/etc/wireguard/` | 见上方"修改配置"3 步走 |
 | `wg-svc-runner` 在日志里反复重启 | `KeepAlive.Crashed=true` 在重新拉起；多数是配置错误 | 日志找最早的 ERROR 行，按上面定位 |
 | 关机/休眠后路由错乱 | macOS 休眠时 utun 状态可能损坏 | `sudo launchctl kickstart -k system/top.qiyuey.wireguard.wg0` |
-| 外网恢复了但隧道仍不通，`wg show` 的 endpoint 是旧 IP | DDNS 切了 IP，wireguard-go 不会自动重解析 | 等 ≤60s watchdog 自愈；急用就 `kickstart -k`。日志里搜 `ddns:` 看 watchdog 是否在跑 |
+| 外网恢复了但隧道仍不通，`wg show` 的 endpoint 是旧 IP | DDNS 切了 IP，wireguard-go 不会自动重解析 | watchdog 在 hs_age ≥ 180s 后才追新 IP（避免追 DDNS 抖动），最坏 ~4 分钟自愈；急用就 `kickstart -k` 强制重启。日志里搜 `ddns:` 看 deferring/updating 决策 |
+| 日志反复 `ddns: ... deferring`（DNS 变了但 watchdog 不动手） | 隧道当前还在通（hs_age < 180s），按设计抑制对 DDNS 抖动的追逐 | 这是正常行为；如果远端确实换 IP 了，等 hs_age 涨过阈值后会自动切。要立即生效就 `kickstart -k` |
 | 日志反复 `ddns: WARN ... FAKE-IP` | 本地/网络 DNS 被劫持成 fake-ip（如 mosdns/AdGuard 的 198.18 池） | watchdog 已经拒绝写入，但本机系统 resolver 也走的同源 → wireguard-go 启动时拿到的就是假 IP；改用未污染的 DNS（`scutil --dns` 检查），或在 `wg0.conf` 把 `Endpoint` 写成 IP 字面量 |
 | 日志反复 `ddns: WARN unable to resolve` | DNS 不可用（断网或 resolver 故障） | 多数能自愈；持续 → `scutil --dns`、`dig @8.8.8.8 <endpoint>` 排查上游 |
 
@@ -198,25 +199,32 @@ wireguard-go **只在启动时解析一次** peer 的 `Endpoint` 主机名，之
 
 为此 runner 后台跑一个监视循环（`DDNS_POLL_SEC=60`）：
 
-- 启动后 2s 做一次"boot-resolved" fake-ip 检测，写 WARN 日志（不阻断）
-- 之后每 60s 通过 `dig`/`host`/`dscacheutil` 解析每个非 IP 字面量的 peer endpoint
+- 启动后 2s 做一次 fake-ip 检测，写 WARN 日志（不阻断）
+- 之后每 60s 重新解析每个非 IP 字面量的 peer endpoint
+- 解析路径**优先 DoH**（按顺序：阿里 DoH → Cloudflare DoH → `223.5.5.5` DoH → `dig @223.5.5.5` → `host @223.5.5.5` → `dscacheutil`），**绕开本机 stub resolver 和任何代理工具的 DNS 缓存**（如 Clash）
   - 解析失败 → WARN，下轮再试
   - 解析到 **fake-ip**（`198.18/15`、`240/4`、`100.64/10`、`0.0.0.0`/`127`、CGNAT）→ WARN 但**不更新** endpoint（避免被劫持 DNS 引到错误地址）
-  - 解析到合法新 IP 且与上次缓存不同 → `wg set <iface> peer <pubkey> endpoint <ip>:<port>` 热更新
+  - 解析到合法新 IP 且与上次缓存不同 → 看握手健康度：
+    - `hs_age < HEALTHY_HS_AGE_SEC`（默认 180s，隧道还在通）→ **deferring**，本轮只 log 不动作，避免追 DDNS 抖动打断 in-progress 会话
+    - `hs_age >= HEALTHY_HS_AGE_SEC`（隧道已断）→ `wg set <iface> peer <pubkey> endpoint <ip>:<port>` 热更新
 - 热更新是 UAPI 调用，**不重启 wireguard-go、不动 utun、不动路由**，下次握手就能恢复
 
 恢复时间预算：
 - **网络抖动 / 端口临时不可达**（DDNS IP 没变）：wireguard-go 自带 keepalive=25s 重试，网络恢复后 **≤5s** 自动握手
-- **DDNS 真的换 IP**：watchdog 检测延迟 **≤60s** + 1 次 UAPI 调用（毫秒级）
+- **远端真的重启或换 IP**：握手停 → hs_age 累积到 180s → 下次 60s tick 检测到 → UAPI 切换 → 下一次 keepalive。**最坏约 4 分钟**
 
-调参数：改 `wg-svc-runner` 顶部 `DDNS_POLL_SEC=60`；想更激进恢复就降到 20。
+调参（在 `wg-svc-runner` 顶部）：
+- `DDNS_POLL_SEC=60` — 改解析频率
+- `HEALTHY_HS_AGE_SEC=180` — 改"隧道仍健康"的阈值。降到 90 更激进恢复但容易追 DDNS 抖动；升到 300 更稳但远端切 IP 后多等几分钟
+- `DOH_URLS=(...)` — 增删可信 DoH 端点
 
-排错：`grep ddns /var/log/wireguard-wg0.log` 看 watchdog 的轨迹，关键事件类型：
+排错：`grep ddns /var/log/wireguard-wg0.log` 看 watchdog 的轨迹，关键事件：
 - `boot-resolved to <ip>` — 启动时第一次记录
-- `<host> <oldip> -> <newip> ; updating peer` — 检测到漂移
+- `<host> <oldip> -> <newip> but hs_age=Ns < 180s, deferring` — DNS 变了但隧道还活，**主动忽略**（这是设计）
+- `<host> <oldip> -> <newip> (hs_age=Ns, tunnel stale) ; updating peer` — 隧道断了才切
 - `endpoint updated to <ip>:<port>` — `wg set` 成功
-- `WARN ... FAKE-IP` — 解析到保留段（可能 DNS 被劫持）
-- `WARN unable to resolve` — DNS 临时不可用
+- `WARN ... FAKE-IP` — 解析到保留段（可能 DNS 被劫持，DoH 也没救回来）
+- `WARN unable to resolve` — 所有 DoH 和 fallback 全失败
 
 ## 完成前验证
 
