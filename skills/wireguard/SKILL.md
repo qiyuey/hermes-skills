@@ -170,8 +170,8 @@ tail -n 50 /var/log/wireguard-wg0.log
 | 修改了 `~/Code/hermes-skills/skills/wireguard/wg0.conf` 但不生效 | 忘了同步到 `/opt/homebrew/etc/wireguard/` | 见上方"修改配置"3 步走 |
 | `wg-svc-runner` 在日志里反复重启 | `KeepAlive.Crashed=true` 在重新拉起；多数是配置错误 | 日志找最早的 ERROR 行，按上面定位 |
 | 关机/休眠后路由错乱 | macOS 休眠时 utun 状态可能损坏 | `sudo launchctl kickstart -k system/top.qiyuey.wireguard.wg0` |
-| 外网恢复了但隧道仍不通，`wg show` 的 endpoint 是旧 IP | DDNS 切了 IP，wireguard-go 不会自动重解析 | watchdog 在 hs_age ≥ 180s 后才追新 IP（避免追 DDNS 抖动），最坏 ~4 分钟自愈；急用就 `kickstart -k` 强制重启。日志里搜 `ddns:` 看 deferring/updating 决策 |
-| 日志反复 `ddns: ... deferring`（DNS 变了但 watchdog 不动手） | 隧道当前还在通（hs_age < 180s），按设计抑制对 DDNS 抖动的追逐 | 这是正常行为；如果远端确实换 IP 了，等 hs_age 涨过阈值后会自动切。要立即生效就 `kickstart -k` |
+| 外网恢复了但隧道仍不通，`wg show` 的 endpoint 是旧 IP | DDNS 切了 IP，wireguard-go 不会自动重解析 | 先 `cat /var/run/wg-svc-<iface>.state` 看 last_decision；典型恢复 ~2.5 分钟（早期判定）/ 最坏 ~4 分钟（兜底）。急用就 `sudo launchctl kickstart -k system/top.qiyuey.wireguard.wg0` |
+| 日志反复 `ddns: ... deferring`（DNS 变了但 watchdog 不动手） | 隧道当前还在通（hs_age 健康），按设计抑制对 DDNS 抖动的追逐 | 这是正常行为；要立即生效就 `kickstart -k` |
 | 日志反复 `ddns: WARN ... FAKE-IP` | 本地/网络 DNS 被劫持成 fake-ip（如 mosdns/AdGuard 的 198.18 池） | watchdog 已经拒绝写入，但本机系统 resolver 也走的同源 → wireguard-go 启动时拿到的就是假 IP；改用未污染的 DNS（`scutil --dns` 检查），或在 `wg0.conf` 把 `Endpoint` 写成 IP 字面量 |
 | 日志反复 `ddns: WARN unable to resolve` | DNS 不可用（断网或 resolver 故障） | 多数能自愈；持续 → `scutil --dns`、`dig @8.8.8.8 <endpoint>` 排查上游 |
 
@@ -209,22 +209,67 @@ wireguard-go **只在启动时解析一次** peer 的 `Endpoint` 主机名，之
     - `hs_age >= HEALTHY_HS_AGE_SEC`（隧道已断）→ `wg set <iface> peer <pubkey> endpoint <ip>:<port>` 热更新
 - 热更新是 UAPI 调用，**不重启 wireguard-go、不动 utun、不动路由**，下次握手就能恢复
 
+三层判据（按从激进到保守的顺序，命中即触发更新）：
+
+1. **early-stall**：`hs_age >= 75s` 且上一轮 `tx_delta >= 100B` 且 `rx_delta == 0`
+   → keepalive 在重试但对端没回任何包，可断定隧道已断
+2. **stale**：`hs_age >= 180s` → 兜底硬阈值，无视 telemetry
+3. **defer**：DNS 变了但前两条都不命中（隧道还活）→ 不动作
+
 恢复时间预算：
-- **网络抖动 / 端口临时不可达**（DDNS IP 没变）：wireguard-go 自带 keepalive=25s 重试，网络恢复后 **≤5s** 自动握手
-- **远端真的重启或换 IP**：握手停 → hs_age 累积到 180s → 下次 60s tick 检测到 → UAPI 切换 → 下一次 keepalive。**最坏约 4 分钟**
+
+| 场景 | 表现 |
+|---|---|
+| 网络抖动 / 端口临时不可达（DDNS IP 没变） | wireguard-go keepalive=25s 重试，网络恢复后 **≤5s** 自动握手 |
+| 远端重启或换 IP，且 watchdog 的 telemetry 看得到 | 早期判定 ≤ 75s + 60s poll + keepalive ≤ 25s ≈ **最快 ~2.5 分钟** |
+| 早期判定不命中（罕见，比如对端虽断但偶发回包） | 兜底 hs_age 180s + 60s poll + 25s ≈ **最坏 ~4 分钟** |
 
 调参（在 `wg-svc-runner` 顶部）：
-- `DDNS_POLL_SEC=60` — 改解析频率
-- `HEALTHY_HS_AGE_SEC=180` — 改"隧道仍健康"的阈值。降到 90 更激进恢复但容易追 DDNS 抖动；升到 300 更稳但远端切 IP 后多等几分钟
-- `DOH_URLS=(...)` — 增删可信 DoH 端点
+- `DDNS_POLL_SEC=60` — 解析频率
+- `EARLY_STALL_HS_AGE_SEC=75` — 早期判定的握手龄阈值（约 3 倍 keepalive）
+- `EARLY_STALL_TX_DELTA=100` — 早期判定要求的 tx 增量字节数（一个 keepalive 包约 32B）
+- `HEALTHY_HS_AGE_SEC=180` — 兜底硬阈值
+- `DOH_URLS=(...)` — 可信 DoH 端点列表
 
 排错：`grep ddns /var/log/wireguard-wg0.log` 看 watchdog 的轨迹，关键事件：
 - `boot-resolved to <ip>` — 启动时第一次记录
-- `<host> <oldip> -> <newip> but hs_age=Ns < 180s, deferring` — DNS 变了但隧道还活，**主动忽略**（这是设计）
-- `<host> <oldip> -> <newip> (hs_age=Ns, tunnel stale) ; updating peer` — 隧道断了才切
+- `<host> <old> -> <new> but hs_age=Ns tx_delta=N rx_delta=N, deferring` — DNS 变了但隧道还活，**主动忽略**
+- `<host> <old> -> <new> (hs_age=Ns tx_delta=N rx_delta=N, update-early-stall) ; updating peer` — 早期判定切
+- `<host> <old> -> <new> (... update-stale) ; updating peer` — 兜底切
 - `endpoint updated to <ip>:<port>` — `wg set` 成功
-- `WARN ... FAKE-IP` — 解析到保留段（可能 DNS 被劫持，DoH 也没救回来）
+- `WARN ... FAKE-IP` — 解析到保留段（DNS 被劫持，DoH 也没救回来）
 - `WARN unable to resolve` — 所有 DoH 和 fallback 全失败
+
+## State 文件（AI / 排错首选入口）
+
+watchdog 每轮把决策快照原子写入 `/var/run/wg-svc-<iface>.state`（644，普通用户可读）。
+排错时**先看这个文件**，比 grep 日志快得多：
+
+```bash
+cat /var/run/wg-svc-utun5.state
+```
+
+字段含义：
+
+| 字段 | 含义 |
+|---|---|
+| `endpoint_ip` / `endpoint_port` | watchdog 视角下当前 peer endpoint（可能短暂滞后于 wireguard-go 内核状态 ≤1 个 poll） |
+| `handshake_age_sec` | 距上次握手秒数；999999 表示从未握手 |
+| `rx_bytes` / `tx_bytes` | 累计字节，wireguard-go 进程重启即清零 |
+| `rx_delta_last_poll` / `tx_delta_last_poll` | 上一轮 poll 之间的增量；`-1` 表示首轮无历史 |
+| `last_decision` | `healthy` / `defer` / `update-early-stall` / `update-stale` / `update-failed` |
+| `last_decision_at` | 上次决策的 ISO 时间戳 |
+| `watchdog_pid` | watchdog 后台子进程 pid（`kill -0` 探活用） |
+| `thresholds` | 当前生效的所有阈值，方便调参验证 |
+
+判断隧道健康度的快速规则：
+
+- `last_decision == healthy` 且 `handshake_age_sec < 60` → 完全正常
+- `last_decision == defer` → DNS 抖了但被设计性忽略，正常
+- `rx_delta_last_poll == 0` 且 `tx_delta_last_poll > 100` → 已经在黑洞，下一轮会触发 early-stall
+- `last_decision == update-failed` → `wg set` 拒绝，看日志找原因
+
+文件在 daemon 退出时自动删除，所以"文件不存在" = "服务没在跑"。
 
 ## 完成前验证
 
