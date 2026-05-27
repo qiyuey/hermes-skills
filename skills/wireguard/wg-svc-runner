@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Foreground supervisor for one WireGuard interface on macOS.
-# Replaces wg-quick: drives wireguard-go + wg + ifconfig + route directly so that
-# launchd can monitor a single, real PID and tear everything down cleanly.
+# Drives wireguard-go + wg + ifconfig + route directly so that launchd can
+# monitor a single, real PID and tear everything down cleanly.
 #
 # Run by LaunchDaemon as root. Do NOT invoke manually.
 
@@ -221,7 +221,8 @@ log "tun ready: $IFACE (wireguard-go pid $WG_PID)"
 
 # --- push cryptokey routing into the kernel via the UAPI socket -------------
 # wg(8) setconf reads [Interface] PrivateKey/ListenPort/FwMark and every [Peer].
-# Strip wg-quick-only keys so older wg builds don't reject the file.
+# Strip non-UAPI keys (Address/DNS/MTU/Table/Pre|PostUp/Down/SaveConfig) so
+# `wg setconf` accepts the file — it only understands kernel UAPI fields.
 TMP_CONF="$(mktemp -t "wg-${NAME}-conf.XXXXXX")"
 trap 'rm -f "$TMP_CONF" "$NAME_FILE"; cleanup' EXIT
 awk '

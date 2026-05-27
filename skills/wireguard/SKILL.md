@@ -3,18 +3,18 @@ name: wireguard
 description: >-
   (qiyuey) Manage the personal WireGuard tunnel on macOS as a LaunchDaemon
   (top.qiyuey.wireguard.wg0) that drives wireguard-go + wg + ifconfig + route
-  directly (no wg-quick). Use when the user asks to start/stop/restart the
-  WireGuard service, check tunnel handshake/status, view its logs, troubleshoot
-  "断网"/route conflicts with the official WireGuard.app, or edit the wg0.conf
-  config. Standard launchctl commands; sudo password is required (no sudoers
-  bypass installed).
+  directly. Use when the user asks to start/stop/restart the WireGuard service,
+  check tunnel handshake/status, view its logs, troubleshoot "断网"/route
+  conflicts with the official WireGuard.app, or edit the wg0.conf config.
+  Standard launchctl commands; sudo password is required (no sudoers bypass
+  installed).
 ---
 
 # WireGuard (macOS, LaunchDaemon)
 
-本机 WireGuard 隧道由一个常驻 LaunchDaemon 接管，**不依赖 `wg-quick`**。
-runner 直接驱动 `wireguard-go` + `wg setconf` + `ifconfig` + `route`，启停干净，
-配合 launchd 自带的 `KeepAlive` 实现异常自恢复。
+本机 WireGuard 隧道由一个常驻 LaunchDaemon 接管。runner 直接驱动
+`wireguard-go` + `wg setconf` + `ifconfig` + `route`，配合 launchd 自带的
+`KeepAlive` 实现异常自恢复。
 
 ## 触发条件
 
@@ -182,7 +182,7 @@ tail -n 50 /var/log/wireguard-wg0.log
 2. 收集所有 `[Peer]` 的 `AllowedIPs`（按逗号拆开）和 `PublicKey`/`Endpoint` 对（给 DDNS watchdog 用）
 3. `WG_TUN_NAME_FILE=/tmp/wg-wg0-name.XXX wireguard-go -f utun &`，作为子进程
 4. 轮询 ≤5s 等 `NAME_FILE` 出现，读出真实 `utunN`
-5. 把 wg-quick 私有字段（`Address/DNS/MTU/Table/Pre|PostUp/Down/SaveConfig`）从配置中 strip 掉，写临时文件
+5. 把 UAPI 不识别的字段（`Address/DNS/MTU/Table/Pre|PostUp/Down/SaveConfig`）从配置中 strip 掉，写临时文件
 6. `wg setconf utunN <临时文件>` 把 PrivateKey + Peer 灌进内核 UAPI
 7. `ifconfig utunN inet <ip>/32 <ip> alias` + `mtu 1420` + `up`
 8. 逐个 `route -q -n add -inet <AllowedIPs> -interface utunN`
@@ -217,16 +217,6 @@ wireguard-go **只在启动时解析一次** peer 的 `Endpoint` 主机名，之
 - `endpoint updated to <ip>:<port>` — `wg set` 成功
 - `WARN ... FAKE-IP` — 解析到保留段（可能 DNS 被劫持）
 - `WARN unable to resolve` — DNS 临时不可用
-
-## 为什么不用 wg-quick
-
-`wg-quick` 是 ~700 行 bash 包装，处理的边界条件（多平台、DNS、Table、PostUp 钩子）远超本机需要。
-直接编排 `wireguard-go + wg + ifconfig + route` 后：
-- launchd 监督的是真实 PID（不是 wrapper 又 fork 出去的孤儿）
-- SIGTERM 路径完全可控，关机/`bootout` 时路由一定会被清掉
-- 改配置只需要 `kickstart -k`，不必 `down` + `up` 两步
-
-如果某天确实需要 `Table` / `DNS` / `PostUp` 等 wg-quick 高级特性，再考虑切回。
 
 ## 完成前验证
 
