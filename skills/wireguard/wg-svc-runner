@@ -14,11 +14,50 @@ WIREGUARD_GO="/opt/homebrew/bin/wireguard-go"
 WG="/opt/homebrew/bin/wg"
 IFCONFIG="/sbin/ifconfig"
 ROUTE="/sbin/route"
+DIG="/usr/bin/dig"
+HOST="/usr/bin/host"
 
-MTU=1420   # standard WireGuard payload MTU over IPv4
+MTU=1420            # standard WireGuard payload MTU over IPv4
+DDNS_POLL_SEC=60    # how often the watchdog re-resolves peer endpoints
 
 log() { echo "[wg-svc-runner ${NAME}] $(date '+%F %T') $*"; }
 die() { log "ERROR: $*"; exit 1; }
+
+# is_fake_ip <ipv4>  → returns 0 (true) if the address is in a reserved/fake range,
+#                      i.e. would be suspicious as a DDNS-resolved WG endpoint.
+is_fake_ip() {
+    local ip="$1" o1 o2
+    o1="${ip%%.*}"; rest="${ip#*.}"; o2="${rest%%.*}"
+    [[ "$o1" =~ ^[0-9]+$ && "$o2" =~ ^[0-9]+$ ]] || return 0   # malformed → treat as fake
+    # 198.18.0.0/15 RFC2544 benchmarking — most common ChinaDNS / mosdns fake-ip
+    if [[ "$o1" == 198 && ( "$o2" == 18 || "$o2" == 19 ) ]]; then return 0; fi
+    # 240.0.0.0/4 reserved
+    if [[ "$o1" -ge 240 ]]; then return 0; fi
+    # 0.0.0.0 and 127/8 — nonsensical as endpoint
+    if [[ "$o1" == 0 || "$o1" == 127 ]]; then return 0; fi
+    # 100.64.0.0/10 CGNAT — sometimes used as fake-ip pool, also normally unreachable from clients
+    if [[ "$o1" == 100 && "$o2" -ge 64 && "$o2" -le 127 ]]; then return 0; fi
+    return 1
+}
+
+# resolve_host <fqdn>  → prints first A record IPv4, or empty if unresolved.
+# Prefers `dig` (no caching), falls back to `host`, finally getent-style.
+resolve_host() {
+    local fqdn="$1" out=""
+    if [[ -x "$DIG" ]]; then
+        out="$($DIG +short +time=2 +tries=1 "$fqdn" A 2>/dev/null \
+            | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/{print; exit}')"
+    fi
+    if [[ -z "$out" && -x "$HOST" ]]; then
+        out="$($HOST -W 2 -t A "$fqdn" 2>/dev/null \
+            | awk '/has address/ {print $4; exit}')"
+    fi
+    if [[ -z "$out" ]]; then
+        out="$(/usr/bin/dscacheutil -q host -a name "$fqdn" 2>/dev/null \
+            | awk '/^ip_address:/ {print $2; exit}')"
+    fi
+    printf '%s' "$out"
+}
 
 [[ -r "$CONF" ]] || die "config $CONF not readable"
 
@@ -53,9 +92,22 @@ done < <(awk '
         for (i=1; i<=n; i++) print a[i]
     }' "$CONF")
 
+# Collect peer Endpoints (PublicKey + host + port) so the DDNS watchdog can
+# re-resolve them periodically. Format per line: "<pubkey>\t<host>\t<port>".
+# Only peers whose host is a hostname (not already an IP literal) need polling.
+PEERS_FILE="$(mktemp -t "wg-${NAME}-peers.XXXXXX")"
+awk '
+    /^\[Peer\]/   { if (pk!="" && ep!="") print pk"\t"ep; pk=""; ep=""; s=1; next }
+    /^\[/         { if (pk!="" && ep!="") print pk"\t"ep; pk=""; ep=""; s=0; next }
+    s && /^[[:space:]]*PublicKey[[:space:]]*=/  { sub(/^[[:space:]]*PublicKey[[:space:]]*=[[:space:]]*/,""); sub(/[[:space:]]+#.*$/,""); pk=$0 }
+    s && /^[[:space:]]*Endpoint[[:space:]]*=/   { sub(/^[[:space:]]*Endpoint[[:space:]]*=[[:space:]]*/,""); sub(/[[:space:]]+#.*$/,""); ep=$0 }
+    END           { if (pk!="" && ep!="") print pk"\t"ep }
+' "$CONF" > "$PEERS_FILE"
+
 # --- runtime state -----------------------------------------------------------
 NAME_FILE="$(mktemp -t "wg-${NAME}-name.XXXXXX")"
 WG_PID=""
+DDNS_PID=""
 IFACE=""
 CLEANED=0
 
@@ -63,6 +115,10 @@ cleanup() {
     [[ "$CLEANED" -eq 1 ]] && return
     CLEANED=1
     log "cleanup begin"
+    if [[ -n "$DDNS_PID" ]] && kill -0 "$DDNS_PID" 2>/dev/null; then
+        log "TERM ddns watchdog pid $DDNS_PID"
+        kill -TERM "$DDNS_PID" 2>/dev/null || true
+    fi
     if [[ -n "$IFACE" ]]; then
         for r in "${ROUTES[@]}"; do
             log "del route $r"
@@ -80,8 +136,69 @@ cleanup() {
         done
         kill -KILL "$WG_PID" 2>/dev/null || true
     fi
-    rm -f "$NAME_FILE"
+    rm -f "$NAME_FILE" "$PEERS_FILE"
     log "cleanup done"
+}
+
+# Watchdog loop: every DDNS_POLL_SEC seconds re-resolve each peer's endpoint
+# hostname; if the IP changed (or first time becomes non-fake), push it to
+# wireguard-go via `wg set <iface> peer <pubkey> endpoint <ip>:<port>`. This
+# survives DDNS rotations without restarting the tunnel.
+ddns_watchdog() {
+    local iface="$1" peers_file="$2"
+    declare -a pubkeys hosts ports last_ips
+    local i=0 line pk endpoint host port
+    while IFS=$'\t' read -r pk endpoint; do
+        [[ -z "$pk" || -z "$endpoint" ]] && continue
+        host="${endpoint%:*}"; port="${endpoint##*:}"
+        # Skip IPv6 literals (contain ':' inside brackets) and bare IPv4 literals.
+        if [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            log "ddns: peer ${pk:0:8}... endpoint is literal IP $host, not polling"
+            continue
+        fi
+        pubkeys[i]="$pk"; hosts[i]="$host"; ports[i]="$port"; last_ips[i]=""
+        log "ddns: peer ${pk:0:8}... will poll $host every ${DDNS_POLL_SEC}s"
+        i=$((i+1))
+    done < "$peers_file"
+    local n=$i
+    [[ "$n" -eq 0 ]] && { log "ddns: no DDNS peers to watch, exiting watchdog"; return 0; }
+    # Initial fake-ip check from the IPs wireguard-go just resolved.
+    sleep 2
+    local j cur initial
+    for ((j=0; j<n; j++)); do
+        initial="$("$WG" show "$iface" endpoints 2>/dev/null \
+            | awk -v k="${pubkeys[j]}" '$1==k {print $2; exit}')"
+        cur="${initial%:*}"
+        last_ips[j]="$cur"
+        if [[ -n "$cur" ]] && is_fake_ip "$cur"; then
+            log "ddns: WARN peer ${pubkeys[j]:0:8}... boot-resolved to FAKE-IP $cur (DNS poisoned?)"
+        else
+            log "ddns: peer ${pubkeys[j]:0:8}... boot-resolved to $cur"
+        fi
+    done
+    while sleep "$DDNS_POLL_SEC"; do
+        for ((j=0; j<n; j++)); do
+            local new_ip
+            new_ip="$(resolve_host "${hosts[j]}")"
+            if [[ -z "$new_ip" ]]; then
+                log "ddns: WARN unable to resolve ${hosts[j]} (will retry next tick)"
+                continue
+            fi
+            if is_fake_ip "$new_ip"; then
+                log "ddns: WARN ${hosts[j]} resolved to FAKE-IP $new_ip — ignoring this tick"
+                continue
+            fi
+            if [[ "$new_ip" != "${last_ips[j]}" ]]; then
+                log "ddns: ${hosts[j]} ${last_ips[j]:-<unset>} -> $new_ip ; updating peer"
+                if "$WG" set "$iface" peer "${pubkeys[j]}" endpoint "${new_ip}:${ports[j]}"; then
+                    last_ips[j]="$new_ip"
+                    log "ddns: peer ${pubkeys[j]:0:8}... endpoint updated to ${new_ip}:${ports[j]}"
+                else
+                    log "ddns: ERROR wg set failed for ${pubkeys[j]:0:8}..."
+                fi
+            fi
+        done
+    done
 }
 on_signal() { log "signal received"; cleanup; exit 0; }
 trap on_signal TERM INT HUP
@@ -130,6 +247,11 @@ for r in "${ROUTES[@]}"; do
     log "add route $r -> $IFACE"
     "$ROUTE" -q -n add -inet "$r" -interface "$IFACE"
 done
+
+# --- DDNS watchdog (background) ---------------------------------------------
+ddns_watchdog "$IFACE" "$PEERS_FILE" &
+DDNS_PID=$!
+log "ddns watchdog started (pid $DDNS_PID, poll=${DDNS_POLL_SEC}s)"
 
 log "up; waiting on wireguard-go ($WG_PID)"
 wait "$WG_PID" 2>/dev/null || true

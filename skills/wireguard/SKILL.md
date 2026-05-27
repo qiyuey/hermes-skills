@@ -170,22 +170,53 @@ tail -n 50 /var/log/wireguard-wg0.log
 | 修改了 `~/Code/hermes-skills/skills/wireguard/wg0.conf` 但不生效 | 忘了同步到 `/opt/homebrew/etc/wireguard/` | 见上方"修改配置"3 步走 |
 | `wg-svc-runner` 在日志里反复重启 | `KeepAlive.Crashed=true` 在重新拉起；多数是配置错误 | 日志找最早的 ERROR 行，按上面定位 |
 | 关机/休眠后路由错乱 | macOS 休眠时 utun 状态可能损坏 | `sudo launchctl kickstart -k system/top.qiyuey.wireguard.wg0` |
+| 外网恢复了但隧道仍不通，`wg show` 的 endpoint 是旧 IP | DDNS 切了 IP，wireguard-go 不会自动重解析 | 等 ≤60s watchdog 自愈；急用就 `kickstart -k`。日志里搜 `ddns:` 看 watchdog 是否在跑 |
+| 日志反复 `ddns: WARN ... FAKE-IP` | 本地/网络 DNS 被劫持成 fake-ip（如 mosdns/AdGuard 的 198.18 池） | watchdog 已经拒绝写入，但本机系统 resolver 也走的同源 → wireguard-go 启动时拿到的就是假 IP；改用未污染的 DNS（`scutil --dns` 检查），或在 `wg0.conf` 把 `Endpoint` 写成 IP 字面量 |
+| 日志反复 `ddns: WARN unable to resolve` | DNS 不可用（断网或 resolver 故障） | 多数能自愈；持续 → `scutil --dns`、`dig @8.8.8.8 <endpoint>` 排查上游 |
 
 ## Runner 内部行为（排错时参考）
 
 `/usr/local/libexec/wg-svc-runner wg0` 的步骤（按顺序，任一步失败立即 cleanup 退出）：
 
 1. 从 `wg0.conf` 的 `[Interface]` 取 `Address`
-2. 收集所有 `[Peer]` 的 `AllowedIPs`（按逗号拆开）
+2. 收集所有 `[Peer]` 的 `AllowedIPs`（按逗号拆开）和 `PublicKey`/`Endpoint` 对（给 DDNS watchdog 用）
 3. `WG_TUN_NAME_FILE=/tmp/wg-wg0-name.XXX wireguard-go -f utun &`，作为子进程
 4. 轮询 ≤5s 等 `NAME_FILE` 出现，读出真实 `utunN`
 5. 把 wg-quick 私有字段（`Address/DNS/MTU/Table/Pre|PostUp/Down/SaveConfig`）从配置中 strip 掉，写临时文件
 6. `wg setconf utunN <临时文件>` 把 PrivateKey + Peer 灌进内核 UAPI
 7. `ifconfig utunN inet <ip>/32 <ip> alias` + `mtu 1420` + `up`
 8. 逐个 `route -q -n add -inet <AllowedIPs> -interface utunN`
-9. `wait $wireguard_go_pid`；收到 SIGTERM/INT/HUP 时反向做：删路由 → `ifconfig down` → kill 子进程
+9. **启动 DDNS watchdog 子进程**（见下节）
+10. `wait $wireguard_go_pid`；收到 SIGTERM/INT/HUP 时反向做：kill watchdog → 删路由 → `ifconfig down` → kill 子进程
 
 排错思路：日志里看上面哪一步留下的 `[wg-svc-runner wg0] ...` 行最后出现，就是卡在哪。
+
+## DDNS Watchdog（自动重连关键路径）
+
+wireguard-go **只在启动时解析一次** peer 的 `Endpoint` 主机名，之后再不重解析。
+如果上游 DDNS 切换了真实 IP，wireguard-go 会一直往**旧 IP** 发握手包永不恢复，直到服务重启。
+
+为此 runner 后台跑一个监视循环（`DDNS_POLL_SEC=60`）：
+
+- 启动后 2s 做一次"boot-resolved" fake-ip 检测，写 WARN 日志（不阻断）
+- 之后每 60s 通过 `dig`/`host`/`dscacheutil` 解析每个非 IP 字面量的 peer endpoint
+  - 解析失败 → WARN，下轮再试
+  - 解析到 **fake-ip**（`198.18/15`、`240/4`、`100.64/10`、`0.0.0.0`/`127`、CGNAT）→ WARN 但**不更新** endpoint（避免被劫持 DNS 引到错误地址）
+  - 解析到合法新 IP 且与上次缓存不同 → `wg set <iface> peer <pubkey> endpoint <ip>:<port>` 热更新
+- 热更新是 UAPI 调用，**不重启 wireguard-go、不动 utun、不动路由**，下次握手就能恢复
+
+恢复时间预算：
+- **网络抖动 / 端口临时不可达**（DDNS IP 没变）：wireguard-go 自带 keepalive=25s 重试，网络恢复后 **≤5s** 自动握手
+- **DDNS 真的换 IP**：watchdog 检测延迟 **≤60s** + 1 次 UAPI 调用（毫秒级）
+
+调参数：改 `wg-svc-runner` 顶部 `DDNS_POLL_SEC=60`；想更激进恢复就降到 20。
+
+排错：`grep ddns /var/log/wireguard-wg0.log` 看 watchdog 的轨迹，关键事件类型：
+- `boot-resolved to <ip>` — 启动时第一次记录
+- `<host> <oldip> -> <newip> ; updating peer` — 检测到漂移
+- `endpoint updated to <ip>:<port>` — `wg set` 成功
+- `WARN ... FAKE-IP` — 解析到保留段（可能 DNS 被劫持）
+- `WARN unable to resolve` — DNS 临时不可用
 
 ## 为什么不用 wg-quick
 
