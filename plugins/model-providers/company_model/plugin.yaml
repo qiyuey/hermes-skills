@@ -1,0 +1,10 @@
+name: company-model-provider
+kind: model-provider
+version: 1.2.0
+description: |
+  公司 Model 平台 (model.zhenguanyu.com) 一体化插件:
+    - Chat completions (claude/opus/sonnet, gpt-5.5, deepseek, kimi, qwen, mimo)
+    - Image generation (gpt-image-2, 三档 quality)
+    - TTS via tts.sh (qwen3-tts-flash, OpenAI-compatible /audio/speech)
+    - ASR via stt.sh (qwen3-asr-flash, OpenAI-compatible /audio/transcriptions)
+author: yuchuan
