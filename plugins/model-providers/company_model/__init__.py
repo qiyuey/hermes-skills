@@ -41,7 +41,7 @@ _CACHE_TTL_SECONDS = 24 * 3600
 # 没有显式映射时 fallback 到子串模糊匹配 (见 ``_lookup_openrouter_metadata``).
 # 只列公司平台 /v1/models 当前实际存在的聊天模型 (snapshot: 2026-05-29).
 _COMPANY_TO_OPENROUTER: dict[str, str] = {
-    "claude-opus-4-7":      "anthropic/claude-opus-4.7",
+    "claude-opus-4-8":      "anthropic/claude-opus-4.8",
     "claude-sonnet-4-6":    "anthropic/claude-sonnet-4.6",
     "gpt-5.5":              "openai/gpt-5.5",
     "deepseek-v4-pro":      "deepseek/deepseek-v4-pro",
@@ -54,7 +54,7 @@ _COMPANY_TO_OPENROUTER: dict[str, str] = {
 # 使用 ``top_provider.max_completion_tokens`` 字段). 即使 OpenRouter 永久不可达,
 # 这里也保证每个模型有合理的输出上限. 实际请求总是优先用 live 元数据.
 _STATIC_FALLBACK_MAX_OUTPUT: dict[str, int] = {
-    "claude-opus-4-7":      128_000,
+    "claude-opus-4-8":      128_000,
     "claude-sonnet-4-6":    128_000,
     "gpt-5.5":              128_000,
     "deepseek-v4-pro":      384_000,
@@ -248,7 +248,7 @@ company_model = CompanyModelProfile(
     # 会通过 live 探测把真实模型 push 到 _PROVIDER_MODELS, 覆盖这个静态列表.
     # 顺序跟公司平台 /v1/models snapshot (2026-05-29) 保持一致, 不强排序.
     fallback_models=(
-        "claude-opus-4-7",
+        "claude-opus-4-8",
         "claude-sonnet-4-6",
         "deepseek-v4-pro",
         "gpt-5.5",

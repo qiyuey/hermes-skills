@@ -445,7 +445,7 @@ rm -f "$TMP_IN" "$TMP_AUDIO" "$TMP_OUT"
 您的 Hermes 现在通过 qiyuey/hermes-skills 仓库的 company_model plugin 接入公司 Model 平台,
 支持 chat / image / TTS / ASR 四种能力, 全部走公司 model.zhenguanyu.com:
 
-- Chat: claude-opus-4-7, claude-sonnet-4-6 (默认), gpt-5.5, deepseek-v4-pro,
+- Chat: claude-opus-4-8, claude-sonnet-4-6 (默认), gpt-5.5, deepseek-v4-pro,
         kimi-k2.6, qwen3.7-max, mimo-v2.5-pro
 - Image: gpt-image-2 (low / medium / high)
 - TTS: qwen3-tts-flash (Cherry voice)
