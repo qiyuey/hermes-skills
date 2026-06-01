@@ -187,10 +187,42 @@ tail -n 50 /var/log/wireguard-wg0.log
 6. `wg setconf utunN <临时文件>` 把 PrivateKey + Peer 灌进内核 UAPI
 7. `ifconfig utunN inet <ip>/32 <ip> alias` + `mtu 1420` + `up`
 8. 逐个 `route -q -n add -inet <AllowedIPs> -interface utunN`
-9. **启动 DDNS watchdog 子进程**（见下节）
-10. `wait $wireguard_go_pid`；收到 SIGTERM/INT/HUP 时反向做：kill watchdog → 删路由 → `ifconfig down` → kill 子进程
+9. **触发 mihomo 重绑**（`restart_mihomo`，见下节）——接口+路由就绪后 kick mihomo，让它绑在 `192.168.10.3` 上的 tunnel listener 重新生效
+10. **启动 DDNS watchdog 子进程**（见下节）
+11. `wait $wireguard_go_pid`；收到 SIGTERM/INT/HUP 时反向做：kill watchdog → 删路由 → `ifconfig down` → kill 子进程
 
 排错思路：日志里看上面哪一步留下的 `[wg-svc-runner wg0] ...` 行最后出现，就是卡在哪。
+
+## mihomo 重绑 hook（WG 重连后自愈关键路径）
+
+**问题**：mihomo（kanyun-proxy，launchd daemon `com.metacubex.mihomo`）的 `tunnels` 段
+在 `192.168.10.3:8388/8389/31443` 上 listen，把公司 SOCKS5 代理（`proxy-jp/aws-us.zhenguanyu.com`）
+和飞连 native 中继给 WG 网段的远端设备用。这些 listener **只在 mihomo 启动时 `bind()` 一次**，
+绑定的是当时那个 utun 接口实例上的 `192.168.10.3`。
+
+WG 断线 → 旧 utun 销毁、`192.168.10.3` 消失 → listener socket 失效。
+WG 重连 → 新 utun 重新挂 `192.168.10.3`，但 mihomo **不会自动重绑** →
+远端连 `192.168.10.3:838x` 直接 refused/timeout，**隧道本身是通的，是中继挂了**。
+
+典型症状：WG `wg show` 健康、内网 ping 通，但远端 `tcping 192.168.10.3 8388` 不通；
+本机 `nc -z 192.168.10.3 8388` 也 closed。
+
+**方案 A（已实现，事件驱动自愈）**：runner 在路由注入完成后调用 `restart_mihomo`：
+- `launchctl kickstart -k system/com.metacubex.mihomo` 重启 mihomo → listener 在 WG 已就绪状态下重绑
+- **后台 detached 执行**（`( sleep 2; kickstart ) &`），不阻塞 runner 到达 `wait`
+- **全程 `|| true` 吞错**：mihomo 出问题绝不能通过 `set -e` 反噬 runner 把隧道拖垮
+- `MIHOMO_REBIND_DELAY=2` 给接口留 2s settle 时间
+- 开关：`MIHOMO_RESTART=1`（默认开），设 `0` 禁用
+- 幂等：mihomo 在跑就重启，没跑就启动
+
+每次 WG 起来 / DDNS 重连 / `kickstart -k` 后，mihomo 自动跟着重绑，零手动。
+日志确认：grep `mihomo .* kickstarted to rebind tunnel listeners`。
+
+**手动兜底**（hook 万一没生效）：`cd ~/Code/kanyun-proxy && sudo ./setup-mihomo.sh restart`。
+
+**重要区分**：远端设备访问公司代理要连**中继地址 `192.168.10.3:8388`（JP）/ `:8389`（AWS-US）**，
+**不是** `proxy-jp.zhenguanyu.com:8388`——后者解析成 `10.43.x.x`（公司 K8s ClusterIP），只在 Mac 侧经 en5 可达，
+远端设备到不了。Mac 上的 mihomo tunnel 替你做了「内网可达性」这一跳。
 
 ## DDNS Watchdog（自动重连关键路径）
 

@@ -32,6 +32,17 @@ EARLY_STALL_TX_DELTA=100    # bytes tx must have grown across the last poll
                             # packet is ~32B; 100B ≈ several retries).
 STATE_FILE_DIR="/var/run"   # where to drop the JSON state file for inspection
 
+# After the interface is up + routed, kick a dependent service that binds a
+# listener to this interface's address (192.168.10.3) and cannot rebind itself
+# when the interface is torn down and recreated. mihomo's `tunnels` listeners
+# (192.168.10.3:8388/8389/31443 → company SOCKS5 relays) are exactly this case:
+# they bind() once at mihomo start, so a WG drop+reconnect leaves them dead
+# until mihomo is restarted. We kickstart it here so a reconnect self-heals.
+# Set MIHOMO_RESTART=0 to disable. Failure here must NEVER take down the tunnel.
+MIHOMO_RESTART="${MIHOMO_RESTART:-1}"
+MIHOMO_LABEL="com.metacubex.mihomo"
+MIHOMO_REBIND_DELAY=2       # seconds to let the interface settle before kicking
+
 # DoH endpoints, queried in order. Each must accept the JSON variant
 # (?name=&type=A with Accept: application/dns-json). AliDoH is closest to the
 # authoritative NS for *.qiyuey.top and gives the freshest TTL; Cloudflare is a
@@ -44,6 +55,30 @@ DOH_URLS=(
 
 log() { echo "[wg-svc-runner ${NAME}] $(date '+%F %T') $*"; }
 die() { log "ERROR: $*"; exit 1; }
+
+# restart_mihomo  → kick the mihomo launchd daemon so its interface-bound
+# tunnel listeners rebind to the freshly-(re)created WG address. Runs fully
+# detached and swallows every error: a mihomo problem must never propagate
+# back into this runner (set -e) and tear the tunnel down. No-op if disabled
+# or if the daemon isn't installed. Idempotent (kickstart -k on a running
+# service just restarts it; on a stopped one it starts it).
+restart_mihomo() {
+    [[ "$MIHOMO_RESTART" == "1" ]] || { log "mihomo restart disabled (MIHOMO_RESTART=0)"; return 0; }
+    # Detach so a slow/hung kickstart can't block our progress to `wait`.
+    (
+        sleep "$MIHOMO_REBIND_DELAY"
+        if launchctl print "system/${MIHOMO_LABEL}" >/dev/null 2>&1; then
+            if launchctl kickstart -k "system/${MIHOMO_LABEL}" >/dev/null 2>&1; then
+                log "mihomo (${MIHOMO_LABEL}) kickstarted to rebind tunnel listeners"
+            else
+                log "WARN mihomo kickstart failed (non-fatal); relay may need manual restart"
+            fi
+        else
+            log "mihomo (${MIHOMO_LABEL}) not installed; skipping rebind"
+        fi
+    ) &
+    return 0
+}
 
 # is_fake_ip <ipv4>  → returns 0 (true) if the address is in a reserved/fake range,
 #                      i.e. would be suspicious as a DDNS-resolved WG endpoint.
@@ -397,6 +432,13 @@ for r in "${ROUTES[@]}"; do
     log "add route $r -> $IFACE"
     "$ROUTE" -q -n add -inet "$r" -interface "$IFACE"
 done
+
+# --- rebind interface-dependent services ------------------------------------
+# The address (192.168.10.3) and routes now exist, so any service that binds a
+# listener to this address can (re)bind successfully. mihomo's tunnel relays
+# bind once at start and don't survive a WG drop+reconnect, so we kick mihomo
+# here. Detached + best-effort; never fails the runner.
+restart_mihomo
 
 # --- DDNS watchdog (background) ---------------------------------------------
 ddns_watchdog "$IFACE" "$PEERS_FILE" &
