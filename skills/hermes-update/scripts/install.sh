@@ -318,11 +318,19 @@ NEXT STEPS (must be done by hand inside Hermes)
    不要附加任何文字。
 2. 不要执行更新、不要调用 send_message、不要创建/修改 cron job；
    这里只负责汇报外部 systemd timer 的结果。
-3. 如果 script_output 是 JSON：
+3. script_output 的第一行是确定性权威锚点，格式为
+   `AUTHORITATIVE_STATUS=*** LABEL=<中文状态词> NEEDS_ATTENTION=<yes|no>`。
+   这是脚本钉死的真理来源，汇报必须满足（QC 校验项，违反即视为汇报错误）：
+   a. 最终汇报的最后一行原样附上该 AUTHORITATIVE_STATUS 锚点行，一字不改。
+   b. 正文描述的状态必须与锚点 LABEL 一致，不得淡化或歪曲。
+   c. NEEDS_ATTENTION=yes 时正文必须含明确的“需要人工查看日志/处理”提示。
+4. 如果 script_output 是 JSON（锚点行之后的部分）：
    - status=updated：用中文简洁汇报“自动更新已完成”，包含
      version/head/origin、patch 是否已验证/恢复、git_status、log 路径。
-   - status=update_failed / patch_failed / skipped_locked：用中文报告
-     状态、关键摘要、log 路径，提醒人工跟进。
+     可选：运行 gh release 读取 changelog 附在“## 更新内容”下，失败则注明。
+   - status=update_failed / patch_failed / skipped_locked / missing：用中文
+     报告状态、关键摘要、log 路径、head/origin/git_status，提醒人工查看日志。
+5. 只使用 script_output 和 gh 读取的 changelog 信息，不要臆测。
 """
      )
 
