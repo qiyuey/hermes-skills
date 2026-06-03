@@ -254,6 +254,62 @@ export STARTED_AT="$(date +%Y-%m-%dT%H:%M:%S%z)"
     echo "PATCH_ENGINE_MISSING $PATCH_ENGINE"
   fi
 
+  # ------------------------------------------------------------------
+  # Known-harmless noise cleanup (conservative whitelist).
+  #
+  # Root cause of the 2026-06-03 patch_failed incident: npm rewrote
+  # package-lock.json (dropped `"peer": true` markers on per-platform
+  # esbuild deps).  This is a TRACKED file, so the patch engine counted
+  # the worktree as dirty (_unstaged_files() only ignores `??` untracked
+  # entries) and refused to cherry-pick local patches, surfacing a bogus
+  # working_tree_dirty conflict.
+  #
+  # Upstream itself documents these lockfile keys as noise (see
+  # hermes_cli/main.py: "Neither key represents a real skew between what
+  # was declared and what was installed").  So restoring the file to HEAD
+  # is the correct fix, not a hack.
+  #
+  # CONSERVATIVE policy (chosen over aggressive auto-restore-all):
+  #   - Only files on NOISE_WHITELIST are eligible.
+  #   - Only act when EVERY dirty (tracked, non-?? ) entry is whitelisted.
+  #   - If any non-whitelisted dirty file exists, do NOTHING and let the
+  #     normal flow report patch_failed so a human can intervene. This
+  #     guarantees we never clobber a real local edit.
+  # ------------------------------------------------------------------
+  NOISE_WHITELIST="package-lock.json"
+  echo "=== pre-update noise cleanup (whitelist: $NOISE_WHITELIST) ==="
+  # Collect tracked dirty files (staged or worktree), excluding untracked (??).
+  dirty_tracked="$(git status --porcelain | awk '$1 != "??" {print substr($0,4)}')"
+  if [ -z "$dirty_tracked" ]; then
+    echo "NOISE_CLEANUP skip=clean_tree"
+  else
+    all_whitelisted=1
+    while IFS= read -r f; do
+      [ -z "$f" ] && continue
+      case " $NOISE_WHITELIST " in
+        *" $f "*) : ;;                       # whitelisted, ok
+        *) all_whitelisted=0; echo "NOISE_CLEANUP non_whitelisted=$f" ;;
+      esac
+    done <<EOF
+$dirty_tracked
+EOF
+    if [ "$all_whitelisted" -eq 1 ]; then
+      # Every dirty tracked file is known-harmless noise — restore to HEAD.
+      while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        if git checkout -- "$f" 2>/dev/null; then
+          echo "NOISE_CLEANUP restored=$f"
+        else
+          echo "NOISE_CLEANUP restore_failed=$f"
+        fi
+      done <<EOF
+$dirty_tracked
+EOF
+    else
+      echo "NOISE_CLEANUP skip=non_whitelisted_files_present (leaving tree dirty for human triage)"
+    fi
+  fi
+
   echo "=== update ==="
   set +e
   timeout 45m "$HERMES_BIN" update --yes --no-restart
