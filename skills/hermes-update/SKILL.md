@@ -1,7 +1,7 @@
 ---
 name: hermes-update
 description: Use when the user asks to update, upgrade, check, or troubleshoot Hermes Agent itself, especially from Telegram/WeChat gateway sessions.
-version: 5.0.0
+version: 5.1.0
 author: Hermes Agent
 metadata:
   hermes:
@@ -226,16 +226,27 @@ uv pip install -e . \
    - 锁防重入（Linux 用 `flock(1)`，macOS 用脚本内置的 `mkdir(2)` 锁 polyfill）
    - 启用 git rerere 记忆冲突解决
    - 跑 `hermes-local-patches.py recover`（commit autostash 残留）
+   - **已知无害噪声清理（保守白名单）**：`NOISE_WHITELIST`（当前=`package-lock.json`）。只有当 `git status` 里**所有**脏 tracked 文件（排除 `??` 未跟踪）都在白名单内时，才 `git checkout --` 还原它们；混入任何非白名单脏文件就**完全不动手**，照常报 `patch_failed` 留人工。这是为根治 working_tree_dirty 误判而加（见下方「常见坑」事故条目）。
    - `hermes update --yes --no-restart`（macOS 上脚本顶部还 polyfill 了 `timeout(1)` 和 `date -Is`）
    - 跑 `hermes-local-patches.py apply`（cherry-pick 缺失 patch；冲突不会中断）
    - 写状态到 `~/.hermes/state/auto-update/latest.json` + 日志到 `~/.hermes/logs/auto-update/<run_id>.log`
    - 启动 `hermes-auto-update-restart-gateway.sh` 异步等 180 秒后再重启 gateway，避开投递竞态。
 
+   > 调整噪声白名单：只动 `hermes-auto-update-external.sh` 顶部 recover 段的 `NOISE_WHITELIST` 变量。加文件前务必确认它确实是「每次 update 都会被工具链无意义改写、且还原到 HEAD 不丢任何真实意图」的噪声（如 lockfile 的 `peer`/`ideallyInert` 抖动）。绝不要把可能含真实改动的文件放进白名单。
+
 3. **Hermes cron reporter** `hermes-auto-update-report.py`：在 17:15 只读取 `latest.json` 并汇报：无更新输出 `[SILENT]`；有更新/失败/patch_failed 才发消息。这个 cron 不再执行 update，所以不会被 gateway restart 打断。
+
+   **确定性状态锚点（harness QC 契约）**：reporter 在 JSON 之前先打印一行机器可校验的锚点：
+   ```
+   AUTHORITATIVE_STATUS=*** LABEL=<中文状态词> NEEDS_ATTENTION=<yes|no>
+   ```
+   这是脚本钉死的「真理来源」，目的是防止汇报 LLM 淡化/歪曲状态（例如把 `patch_failed` 说成「基本正常」）。`STATUS_LABELS` 映射在 reporter 顶部；`NEEDS_ATTENTION=yes` 集合 = `{update_failed, patch_failed, missing}`。reporter cron job（`c6b8487f8eb5`）的 prompt 规则强制 LLM：① 最后一行原样透传该锚点；② 正文状态与 LABEL 一致；③ `NEEDS_ATTENTION=yes` 时必须含人工提示。`[SILENT]`（无更新 / 陈旧日期）路径不打印锚点。
 
    reporter cron job 的 prompt 规则（`status=updated` 时）：
    - 汇报 version/head/origin、patch 验证/恢复状态、log 路径。
    - **必须额外读取 changelog**：运行 `gh release list --repo NousResearch/hermes-agent --limit 3` + `gh release view <最新tag> --repo NousResearch/hermes-agent`，提取 3-5 条相关更新内容附在报告里（标题"## 更新内容"）。gh 失败时跳过并注明"(changelog 获取失败)"。
+
+   > ⚠️ 改 reporter 行为（含锚点/STATUS_LABELS）要**三处同步**，否则新装机会退化：① repo 真身 `scripts/hermes-auto-update-report.py`；② 线上 cron job prompt（`cronjob(action="update", job_id="c6b8487f8eb5", …)`）；③ `install.sh` 内嵌的 reporter prompt（新装机据此重建 cron）。漏改 ③ 是隐性陷阱——本地能跑但全新装机丢失修复。
 
 修改了什么不要忘了：
 - 把 `--no-restart` 本地 patch 记录进 `~/.hermes/local-patches/hermes-agent.yaml`，否则 upstream update 可能覆盖该能力。
@@ -264,7 +275,20 @@ uv pip install -e . \
 | `~/.config/systemd/user/hermes-auto-update.{service,timer}` | rendered (Linux) | `…/hermes-update/scripts/templates/hermes-auto-update.{service,timer}` |
 | `~/Library/LaunchAgents/com.hermes.auto-update.plist` | rendered (macOS) | `…/hermes-update/scripts/templates/com.hermes.auto-update.plist`（`__SCRIPT__` / `__LOG_DIR__` 由 install.sh 替换为绝对路径） |
 
-为什么 reporter 用 wrapper 而不是 symlink：`hermes-agent/cron/scheduler.py::_run_job_script` 调用 `path.resolve()` 后做 `relative_to(scripts_dir_resolved)` 检查，故意拒绝 symlink 逃逸出 `~/.hermes/scripts/` 的脚本。Cron job `c6b8487f8eb5`（`hermes-auto-update-report`）的 `script` 字段必须是真正落在 `scripts_dir` 内的文件，所以这里留一个 4 行的 wrapper，让真实逻辑仍然在 repo 里。
+为什么 reporter 用 wrapper 而不是 symlink：`hermes-agent/cron/scheduler.py::_run_job_script` 调用 `path.resolve()` 后做 `relative_to(scripts_dir_resolved)` 检查，故意拒绝 symlink 逃逸出 `~/.hermes/scripts/` 的脚本。Cron job `c6b8487f8eb5`（`hermes-auto-update-report`）的 `script` 字段必须是真正落在 `scripts_dir` 内的文件，所以这里留一个薄 wrapper（仅 `runpy.run_path(真身)`），让真实逻辑仍然在 repo 里。其它 3 个脚本不经过 cron 的 `script:` 校验（external.sh 由 timer 调、local-patches.py 与 restart-gateway.sh 由 external.sh 调），所以能直接 symlink。
+
+> ⚠️ **wrapper 漂移陷阱**：`~/.hermes/scripts/hermes-auto-update-report.py` 是 `install.sh` 从 `templates/hermes-auto-update-report.wrapper.py` **复制**出来的真实文件，**不入 git**。而 `install.sh` 的 `install_wrapper` 有幂等保护——文件已存在且没传 `--force` 就跳过（`wrapper present, leaving alone`）。所以当 repo 模板更新（例如加 `HERMES_SKILLS_DIR` 支持）后，老机器的本地 wrapper **不会自动跟上**，会停在旧版。
+>
+> 模板变更后对齐本地 wrapper（二选一）：
+> ```bash
+> # A) 直接用权威模板重装（最快）
+> install -m 0755 "$HOME/Code/hermes-skills/skills/hermes-update/scripts/templates/hermes-auto-update-report.wrapper.py" \
+>   "$HOME/.hermes/scripts/hermes-auto-update-report.py"
+> # B) 或重跑安装器并强制覆盖 wrapper
+> "$HOME/Code/hermes-skills/skills/hermes-update/scripts/install.sh" --force
+> ```
+> 对齐后务必从 cron 入口实跑验证转发正常：`python3 ~/.hermes/scripts/hermes-auto-update-report.py`（应输出 `[SILENT]` 或锚点+JSON，exit 0）。
+> 校验是否漂移：`diff ~/.hermes/scripts/hermes-auto-update-report.py ~/Code/hermes-skills/skills/hermes-update/scripts/templates/hermes-auto-update-report.wrapper.py`（无输出=已对齐）。
 
 修改任意脚本都在 repo 里改，然后 `cd ~/Code/hermes-skills && git add … && git commit && git push` 即可，`~/.hermes/scripts/` 不需要动。新增脚本时：
 - 如果不通过 cron `script:` 字段调用 → 直接在 `~/.hermes/scripts/` 里 `ln -s "$HOME/Code/hermes-skills/skills/hermes-update/scripts/<new>" <new>` 即可（用绝对路径让 systemd/cron 也能 resolve）。
@@ -344,6 +368,7 @@ gh repo clone qiyuey/hermes-skills "$HOME/Code/hermes-skills"
 | 工作区里有未提交的"功能性"改动（不是临时调试） | 上一次会话写完忘了 commit；直接 update 会让它以 unstaged 状态留下来 | `hermes-local-patches.py recover` 自动 commit；如果不在 manifest 里就先 `git diff` 判断，再补 manifest |
 | 本地 `git log origin/main..HEAD` 有 commit 但 patch manifest 没登记 | 之前手工 commit 但没维护 manifest；未来某次 cherry-pick 时找不到 ref | 更新前补全 manifest（每个本地 commit 一个条目，`commit_candidates` 填 short hash） |
 | patch 引擎输出 `PATCH_CONFLICT` | cherry-pick 该 patch 时和上游 main 冲突；常见原因：上游重构了 patch 触及的函数 | 引擎已 abort，工作区干净。读 `~/.hermes/local-patches/hermes-agent.yaml` 该条目的 `upstream_convergence_hint`，定位上游重构后的新位置，手工 cherry-pick + 修改路径，commit 后下次 marker 就能匹配 |
+| patch 引擎输出 `PATCH_CONFLICT` reason=working_tree_dirty，但脏文件其实是工具链噪声（如 npm 改写的 `package-lock.json`） | `hermes-local-patches.py` 的 `_unstaged_files()` 只忽略 `??` 未跟踪项，对任何 tracked 文件的 worktree 改动都判 dirty 而拒绝 cherry-pick；npm 每次 `install` 会抖动 lockfile（删 `peer:true`），于是 patch 恢复被无关噪声卡死（2026-06-03 事故根因） | 已由 external.sh 的 `NOISE_WHITELIST` 保守清理根治。手动遇到时：先 `git diff <噪声文件>` 确认确实是无意义抖动（上游 `hermes_cli/main.py` 已注明 `peer`/`ideallyInert` 是噪声），`git checkout -- <文件>` 还原后再 `hermes-local-patches.py apply`。若脏文件含真实改动，先 commit/登记 manifest 再说 |
 | patch 引擎输出 `PATCH_MISSING_REF` | manifest 里所有 `commit_candidates` 都不存在（reflog GC + 上次 update 重写历史） | 用 `git log` / `gh pr view` 找最近一次成功 apply 的 SHA，补到 `commit_candidates` 头部 |
 | 用户问"`.hermes` 是 git 仓库吗？"或要求清理更新残留 | `~/.hermes` 本身通常不是 git 仓库；源码仓库在 `~/.hermes/hermes-agent`，skills 可能 symlink 到 `~/Code/hermes-skills` | 先分别验证 `git rev-parse --show-toplevel`，只在确认的仓库根目录执行 `git restore`/删除 untracked；不要把 `~/.hermes` 根目录当仓库 |
 | `gh release` 不可用 | gh 未安装或未认证 | 跳过 release notes，不影响更新结论 |
