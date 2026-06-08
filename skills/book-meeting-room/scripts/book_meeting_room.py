@@ -241,7 +241,7 @@ def query_rooms(session, book_date, office_ids, page_size=100):
             # 顺便检测日期未开放（code=-1 且"参数非法"）
             if data.get("code") == -1 and "参数非法" in (data.get("message") or ""):
                 return oid, None, "date_not_open"
-            return oid, data.get("data", {}).get("list", []), None
+            return oid, (data.get("data") or {}).get("list", []), None
         except Exception as e:
             print(f"[!] queryList officeId={oid} 失败: {e}")
             return oid, [], None
