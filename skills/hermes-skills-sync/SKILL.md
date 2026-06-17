@@ -6,7 +6,7 @@ author: Hermes Agent
 metadata:
   hermes:
     tags: [hermes, skills, plugins, sync, github, symlink]
-    related_skills: [hermes-update]
+    related_skills: []
 ---
 
 # hermes-skills-sync

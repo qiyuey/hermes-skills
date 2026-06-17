@@ -29,7 +29,6 @@ hermes skills install book-meeting-room
 |-------|-------------|
 | [book-meeting-room](./skills/book-meeting-room/SKILL.md) | 自动抢预会议室系统 meeting-room.zhenguanyu.com，支持查询空闲会议室、高频 cron 狙击抢占、弹性时长/容量、0点黄金窗口放行 |
 | [hermes-skills-sync](./skills/hermes-skills-sync/SKILL.md) | 管理本仓库 — 首次安装（clone + symlink）、更新（git pull）、把本地修改的 skill / plugin 推送回仓库 |
-| [hermes-update](./skills/hermes-update/SKILL.md) | Hermes 更新流程 — 通过 cron job 在后台执行，避免 gateway 重启中断当前会话 |
 | [hermes-setup-company-model](./skills/hermes-setup-company-model/SKILL.md) | 帮助公司同事在 macOS 上安装 Hermes Agent，并配置使用公司 Model 平台（model.zhenguanyu.com） |
 | [wireguard](./skills/wireguard/SKILL.md) | 本机 WireGuard 隧道以 LaunchDaemon 形式运行，直接驱动 wireguard-go + wg + ifconfig + route；用 launchctl 管理启停/重启/状态 |
 
@@ -46,7 +45,6 @@ hermes-skills/
 ├── skills/                            # 每个子目录 symlink 到 ~/.hermes/skills/<name>/
 │   ├── book-meeting-room/
 │   ├── hermes-skills-sync/
-│   ├── hermes-update/
 │   ├── hermes-setup-company-model/
 │   └── wireguard/
 └── plugins/                           # 每个子目录 symlink 到 ~/.hermes/plugins/<category>/<name>/
