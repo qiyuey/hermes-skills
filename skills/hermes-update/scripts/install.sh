@@ -176,7 +176,7 @@ seed_local_patches() {
 SKIP_RESTART_PATCH_STATUS=""
 
 check_or_apply_skip_restart_patch() {
-  local patch_file="$PATCHES_DIR/0001-fix-update-allow-external-schedulers-to-skip-gateway-restart.patch"
+  local patch_file="$PATCHES_DIR/0001-feat-update-add-no-restart-flag.patch"
   if [ ! -d "$HERMES_AGENT_REPO/.git" ]; then
     SKIP_RESTART_PATCH_STATUS="no-repo"
     warn "hermes-agent repo not found at $HERMES_AGENT_REPO; skip-restart patch step deferred"
@@ -364,7 +364,7 @@ EOF
    with --apply-patches to git-am it automatically, or do it by hand:
 
      cd $HERMES_AGENT_REPO
-     git am $PATCHES_DIR/0001-fix-update-allow-external-schedulers-to-skip-gateway-restart.patch
+     git am $PATCHES_DIR/0001-feat-update-add-no-restart-flag.patch
      git rev-parse --short HEAD
 
    Then put the new short SHA into the commit_candidates list of
@@ -391,7 +391,7 @@ EOF
       cat <<EOF
 2. Apply the HERMES_UPDATE_SKIP_GATEWAY_RESTART patch once
    $HERMES_AGENT_REPO exists; install.sh ships the patch at
-   $PATCHES_DIR/0001-fix-update-allow-external-schedulers-to-skip-gateway-restart.patch
+   $PATCHES_DIR/0001-feat-update-add-no-restart-flag.patch
    and \`--apply-patches\` will git-am it for you.
 
 EOF

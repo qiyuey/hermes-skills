@@ -34,7 +34,7 @@ patches:
 # will detect the marker in HEAD and just report PATCH_OK forever.
 #
 # `install.sh --apply-patches` will git-am the canonical patch shipped at
-#   skills/hermes-update/patches/0001-fix-update-allow-external-schedulers-to-skip-gateway-restart.patch
+#   skills/hermes-update/patches/0001-feat-update-add-no-restart-flag.patch
 # and rewrite the REPLACE_WITH_YOUR_COMMIT_SHORT_SHA placeholder below with
 # the resulting commit's short SHA.  Doing it by hand:
 #   cd ~/.hermes/hermes-agent
@@ -56,3 +56,4 @@ patches:
     after update" block in hermes_cli/main.py with an env var or CLI flag.
   touched_files:
   - hermes_cli/main.py
+  - hermes_cli/subcommands/update.py
