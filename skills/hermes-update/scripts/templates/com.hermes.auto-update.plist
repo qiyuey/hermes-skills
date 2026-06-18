@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  LaunchAgent equivalent of hermes-auto-update.timer + hermes-auto-update.service.
+  Installed into ~/Library/LaunchAgents/com.hermes.auto-update.plist by
+  hermes-update's install.sh on macOS.  install.sh replaces two placeholder
+  strings before writing the rendered plist: SCRIPT (with the absolute path
+  to ~/.hermes/scripts/hermes-auto-update-external.sh) and LOG_DIR (with the
+  absolute path of the per-run log directory). The placeholders use the
+  __NAME__ form in this template; please keep them out of human-readable
+  prose in this comment block to avoid accidental substitution.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.hermes.auto-update</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>__SCRIPT__</string>
+  </array>
+
+  <!-- 17:00 local time daily, matching the systemd OnCalendar value. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>17</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <!-- Don't fire when the agent is first loaded; only on the schedule. -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <!-- If the machine was asleep at 17:00, run the missed invocation once
+       the machine wakes (launchd's analogue of systemd's Persistent=true). -->
+  <key>StartCalendarIntervalCoalesce</key>
+  <true/>
+
+  <!-- Throttle relaunches in case the script ever exits very quickly; this
+       does NOT delay the scheduled run, only crash-loop retries. -->
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/launchd.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/launchd.stderr.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Mirror the PATH lookups in hermes-auto-update-external.sh so the
+         brew hermes binary is discoverable when launchd's stripped PATH
+         would otherwise miss it.  HOME is set automatically for a per-user
+         LaunchAgent so we don't repeat it here. -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>

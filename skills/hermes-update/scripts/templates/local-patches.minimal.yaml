@@ -1,0 +1,58 @@
+# Hermes local-patch manifest (minimal template seeded by install.sh).
+#
+# Owned by: ~/.hermes/scripts/hermes-local-patches.py
+# Used by:  ~/.hermes/scripts/hermes-auto-update-external.sh (daily systemd timer)
+#
+# Each patch entry must declare:
+#   name                 unique slug, used in PATCH_OK / PATCH_RESTORED logs
+#   marker_file          path under hermes-agent/ inspected to detect presence
+#   marker_regex         Python regex matched against marker_file's text;
+#                        match in HEAD => committed, match only in worktree =>
+#                        unstaged (auto-recover), no match => missing
+#   commit_candidates    refs (branches, tags, SHAs) tried in order when the
+#                        patch needs to be cherry-picked.  The engine
+#                        prepends successfully-applied SHAs to
+#                        ~/.hermes/local-patches/.applied-history.json so
+#                        the freshest commit is always tried first.
+#   commit_message       message used both for cherry-pick commits and for
+#                        recommitting unstaged worktree changes
+#   touched_files        files this patch is allowed to modify when
+#                        recovering unstaged changes (prevents the engine
+#                        from sweeping unrelated files into the commit)
+#
+# Optional documentation-only fields:
+#   failure_pattern               user-visible symptoms when the patch is missing
+#   upstream_convergence_hint     where to expect upstream to land an equivalent fix
+#
+# When upstream merges an equivalent fix, the patch's marker_regex will
+# match HEAD's tree and the engine reports PATCH_OK without doing anything;
+# the entry can then be removed from this manifest.
+
+patches:
+# The auto-update flow itself relies on this hermes_cli/main.py branch.  If
+# upstream ever lands an equivalent flag, remove this entry — the engine
+# will detect the marker in HEAD and just report PATCH_OK forever.
+#
+# `install.sh --apply-patches` will git-am the canonical patch shipped at
+#   skills/hermes-update/patches/0001-fix-update-allow-external-schedulers-to-skip-gateway-restart.patch
+# and rewrite the REPLACE_WITH_YOUR_COMMIT_SHORT_SHA placeholder below with
+# the resulting commit's short SHA.  Doing it by hand:
+#   cd ~/.hermes/hermes-agent
+#   git am ~/Code/hermes-skills/skills/hermes-update/patches/0001-*.patch
+#   git rev-parse --short HEAD   # plug into commit_candidates
+- name: hermes-update-skip-gateway-restart
+  marker_file: hermes_cli/main.py
+  marker_regex: HERMES_UPDATE_SKIP_GATEWAY_RESTART
+  commit_candidates:
+  - REPLACE_WITH_YOUR_COMMIT_SHORT_SHA
+  commit_message: 'fix(update): allow external schedulers to skip gateway restart'
+  failure_pattern: >
+    Daily systemd timer runs `hermes update` which restarts the gateway
+    immediately; the hermes-auto-update-report cron job is hosted by that
+    same gateway, so its delivery is killed mid-flight with
+    "cannot schedule new futures after interpreter shutdown".
+  upstream_convergence_hint: >
+    Upstream is most likely to gate the existing "Auto-restart ALL gateways
+    after update" block in hermes_cli/main.py with an env var or CLI flag.
+  touched_files:
+  - hermes_cli/main.py
