@@ -16,6 +16,12 @@ set -euo pipefail
 
 INPUT_FILE="$1"
 OUTPUT_FILE="$2"
+if [[ -z "${COMPANY_MODEL_API_KEY:-}" && -f "${HOME}/.hermes/.env" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "${HOME}/.hermes/.env"
+    set +a
+fi
 API_KEY="${COMPANY_MODEL_API_KEY}"
 
 if [[ -z "${API_KEY}" ]]; then
