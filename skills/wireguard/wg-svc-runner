@@ -40,7 +40,7 @@ STATE_FILE_DIR="/var/run"   # where to drop the JSON state file for inspection
 # until mihomo is restarted. We kickstart it here so a reconnect self-heals.
 # Set MIHOMO_RESTART=0 to disable. Failure here must NEVER take down the tunnel.
 MIHOMO_RESTART="${MIHOMO_RESTART:-1}"
-MIHOMO_LABEL="com.metacubex.mihomo"
+MIHOMO_LABEL="top.qiyuey.home-proxy.gateway"
 MIHOMO_REBIND_DELAY=2       # seconds to let the interface settle before kicking
 
 # DoH endpoints, queried in order. Each must accept the JSON variant

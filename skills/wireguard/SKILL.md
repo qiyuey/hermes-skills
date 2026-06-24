@@ -195,7 +195,7 @@ tail -n 50 /var/log/wireguard-wg0.log
 
 ## mihomo 重绑 hook（WG 重连后自愈关键路径）
 
-**问题**：mihomo（kanyun-proxy，launchd daemon `com.metacubex.mihomo`）的 `tunnels` 段
+**问题**：home-proxy gateway（launchd daemon `top.qiyuey.home-proxy.gateway`）的 `tunnels` 段
 在 `192.168.10.3:8388/8389/31443` 上 listen，把公司 SOCKS5 代理（`proxy-jp/aws-us.zhenguanyu.com`）
 和飞连 native 中继给 WG 网段的远端设备用。这些 listener **只在 mihomo 启动时 `bind()` 一次**，
 绑定的是当时那个 utun 接口实例上的 `192.168.10.3`。
@@ -208,7 +208,7 @@ WG 重连 → 新 utun 重新挂 `192.168.10.3`，但 mihomo **不会自动重�
 本机 `nc -z 192.168.10.3 8388` 也 closed。
 
 **方案 A（已实现，事件驱动自愈）**：runner 在路由注入完成后调用 `restart_mihomo`：
-- `launchctl kickstart -k system/com.metacubex.mihomo` 重启 mihomo → listener 在 WG 已就绪状态下重绑
+- `launchctl kickstart -k system/top.qiyuey.home-proxy.gateway` 重启 home-proxy gateway → listener 在 WG 已就绪状态下重绑
 - **后台 detached 执行**（`( sleep 2; kickstart ) &`），不阻塞 runner 到达 `wait`
 - **全程 `|| true` 吞错**：mihomo 出问题绝不能通过 `set -e` 反噬 runner 把隧道拖垮
 - `MIHOMO_REBIND_DELAY=2` 给接口留 2s settle 时间
