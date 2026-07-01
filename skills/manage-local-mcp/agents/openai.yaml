@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manage Local MCP"
+  short_description: "Create and wire local MCP services"
+  default_prompt: "Use $manage-local-mcp to install a local Playwright MCP service and configure it for Codex and Zed."
