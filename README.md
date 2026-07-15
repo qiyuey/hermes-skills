@@ -1,4 +1,11 @@
-# hermes-skills
+# hermes-skills（已归档）
+
+> [!IMPORTANT]
+> **本仓库已停止维护，并已归档。**
+>
+> 个人 Agent 工作流已经全面迁移到 **Codex**；Codex 已完全替代 Hermes，因此这里的 Hermes skills、plugins 和相关配置不会再更新，也不再接受 Issue 或 Pull Request。
+
+以下内容仅作为历史资料保留。
 
 Personal [Hermes Agent](https://github.com/hermesagent/hermes) configuration repository by [@qiyuey](https://github.com/qiyuey).
 
